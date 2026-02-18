@@ -1,0 +1,547 @@
+---
+title: 'configurator.py'
+description: 'Simple configuration system with file and command-line overrides'
+icon: 'sliders'
+---
+
+## Overview
+
+The `configurator.py` module implements a minimalist configuration system for nanoGPT. It allows you to override default parameters using config files and command-line arguments with type checking.
+
+**Philosophy:**
+- Simple and transparent (no complex config libraries)
+- No need to prepend `config.` to every variable
+- Config files are plain Python scripts
+- Command-line arguments override config files
+- Automatic type checking and validation
+
+**Source:** `configurator.py` (48 lines)
+
+## How It Works
+
+The configurator is executed via `exec()` in training/sampling scripts:
+
+```python
+# In train.py or sample.py
+config_keys = [k for k,v in globals().items() 
+               if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
+exec(open('configurator.py').read())  # Overrides from command line or config file
+config = {k: globals()[k] for k in config_keys}  # Capture final config
+```
+
+The configurator modifies the global namespace directly, making configuration natural and Pythonic.
+
+## Usage
+
+### Default Parameters
+
+Scripts define defaults as module-level variables:
+
+```python
+# train.py (lines 34-74)
+out_dir = 'out'
+eval_interval = 2000
+log_interval = 1
+batch_size = 12
+learning_rate = 6e-4
+max_iters = 600000
+# ... etc
+```
+
+### Config Files
+
+Config files are plain Python scripts that override defaults:
+
+<CodeGroup>
+```python config/train_shakespeare_char.py
+# Train a miniature character-level Shakespeare model
+
+out_dir = 'out-shakespeare-char'
+eval_interval = 250
+log_interval = 10
+
+always_save_checkpoint = False
+
+dataset = 'shakespeare_char'
+gradient_accumulation_steps = 1
+batch_size = 64
+block_size = 256  # context of up to 256 previous characters
+
+# Baby GPT model
+n_layer = 6
+n_head = 6
+n_embd = 384
+dropout = 0.2
+
+learning_rate = 1e-3
+max_iters = 5000
+lr_decay_iters = 5000
+min_lr = 1e-4
+beta2 = 0.99
+
+warmup_iters = 100
+```
+
+```python config/train_gpt2.py
+# Reproduce GPT-2 (124M) on OpenWebText
+
+out_dir = 'out-gpt2'
+eval_interval = 1000
+eval_iters = 200
+log_interval = 10
+
+wandb_log = True
+wandb_project = 'gpt2-reproduction'
+wandb_run_name = 'gpt2-124M'
+
+dataset = 'openwebtext'
+gradient_accumulation_steps = 40
+batch_size = 12
+block_size = 1024
+
+# GPT-2 124M config
+n_layer = 12
+n_head = 12
+n_embd = 768
+dropout = 0.0
+bias = False
+
+learning_rate = 6e-4
+max_iters = 600000
+weight_decay = 1e-1
+beta1 = 0.9
+beta2 = 0.95
+grad_clip = 1.0
+
+decay_lr = True
+warmup_iters = 2000
+lr_decay_iters = 600000
+min_lr = 6e-5
+```
+
+```python config/finetune_shakespeare.py
+# Finetune GPT-2 on Shakespeare
+
+out_dir = 'out-shakespeare'
+eval_interval = 5
+eval_iters = 40
+log_interval = 1
+
+# Only save when val improves (we'll overfit)
+always_save_checkpoint = False
+
+wandb_log = False
+wandb_project = 'shakespeare'
+wandb_run_name = 'ft-gpt2'
+
+dataset = 'shakespeare'
+gradient_accumulation_steps = 1
+batch_size = 1
+block_size = 1024
+
+# Start from pretrained GPT-2
+init_from = 'gpt2'
+
+# Finetune for very few iterations
+learning_rate = 3e-5
+max_iters = 20
+lr_decay_iters = 20
+min_lr = 3e-6
+
+beta2 = 0.99
+warmup_iters = 1
+```
+</CodeGroup>
+
+### Command-Line Arguments
+
+Override parameters using `--key=value` syntax:
+
+<CodeGroup>
+```bash Basic Override
+# Single parameter
+python train.py --batch_size=32
+
+# Multiple parameters
+python train.py --batch_size=32 --learning_rate=3e-4
+```
+
+```bash With Config File
+# Config file + overrides
+python train.py config/train_shakespeare_char.py --max_iters=10000
+
+# Override config file settings
+python train.py config/train_gpt2.py --wandb_log=False --compile=False
+```
+
+```bash Boolean Values
+# Booleans (parsed as Python literals)
+python train.py --compile=True
+python train.py --compile=False
+python train.py --wandb_log=True --always_save_checkpoint=False
+```
+
+```bash Numeric Values
+# Integers
+python train.py --max_iters=5000 --n_layer=24
+
+# Floats (including scientific notation)
+python train.py --learning_rate=1e-3 --dropout=0.1
+python train.py --temperature=0.8 --weight_decay=1e-1
+```
+
+```bash String Values
+# Strings (with or without quotes)
+python train.py --out_dir=my-experiment
+python train.py --dataset=openwebtext
+python train.py --init_from=gpt2-xl
+```
+</CodeGroup>
+
+## Execution Order
+
+1. **Script Defaults**: Variables defined in the script (`train.py`, `sample.py`)
+2. **Config File**: Overrides from config file (if provided)
+3. **Command-Line**: Overrides from `--key=value` arguments
+
+**Example:**
+```bash
+python train.py config/train_shakespeare_char.py --learning_rate=5e-4
+```
+
+1. `train.py` sets `learning_rate = 6e-4` (default)
+2. `config/train_shakespeare_char.py` sets `learning_rate = 1e-3`
+3. Command-line sets `learning_rate = 5e-4` (final value)
+
+## Type Checking
+
+The configurator automatically validates types:
+
+```python
+# In configurator.py (lines 34-42)
+if key in globals():
+    try:
+        # Attempt to eval it (e.g. if bool, number, etc)
+        attempt = literal_eval(val)
+    except (SyntaxError, ValueError):
+        # If that goes wrong, just use the string
+        attempt = val
+    # Ensure the types match ok
+    assert type(attempt) == type(globals()[key])
+    globals()[key] = attempt
+```
+
+### Type Validation Examples
+
+<CodeGroup>
+```bash Valid
+# Correct types
+python train.py --batch_size=32          # int
+python train.py --learning_rate=1e-3     # float
+python train.py --compile=False          # bool
+python train.py --dataset=shakespeare    # str
+```
+
+```bash Invalid
+# Type mismatch - these will fail
+python train.py --batch_size=32.5        # Error: int expected, got float
+python train.py --learning_rate=hello    # Error: float expected, got str
+python train.py --compile=yes            # Error: bool expected, got str
+python train.py --max_iters=1e5          # Error: int expected, got float
+```
+</CodeGroup>
+
+**Error Messages:**
+```bash
+AssertionError: type mismatch for key 'batch_size'
+Expected <class 'int'>, got <class 'float'>
+```
+
+## Argument Parsing
+
+The configurator processes `sys.argv[1:]`:
+
+```python
+for arg in sys.argv[1:]:
+    if '=' not in arg:
+        # assume it's the name of a config file
+        assert not arg.startswith('--')
+        config_file = arg
+        print(f"Overriding config with {config_file}:")
+        with open(config_file) as f:
+            print(f.read())
+        exec(open(config_file).read())
+    else:
+        # assume it's a --key=value argument
+        assert arg.startswith('--')
+        key, val = arg.split('=')
+        key = key[2:]  # Remove '--' prefix
+        # ... type checking and assignment ...
+```
+
+### Argument Formats
+
+<ParamField path="config_file" type="positional">
+  Path to Python config file (no `=` sign, no `--` prefix)
+  
+  ```bash
+  python train.py config/train_gpt2.py
+  ```
+</ParamField>
+
+<ParamField path="--key=value" type="named">
+  Key-value pair for parameter override (must start with `--`, must contain `=`)
+  
+  ```bash
+  python train.py --batch_size=32
+  ```
+</ParamField>
+
+## Value Parsing
+
+Values are parsed using `ast.literal_eval()`:
+
+```python
+from ast import literal_eval
+
+try:
+    attempt = literal_eval(val)
+except (SyntaxError, ValueError):
+    attempt = val  # Use as string if parsing fails
+```
+
+**Parsed Types:**
+
+| Input | Type | Value |
+|-------|------|-------|
+| `32` | int | `32` |
+| `1e-3` | float | `0.001` |
+| `True` | bool | `True` |
+| `False` | bool | `False` |
+| `"hello"` | str | `"hello"` |
+| `hello` | str | `"hello"` (falls back to string) |
+| `[1,2,3]` | list | `[1, 2, 3]` |
+| `None` | NoneType | `None` |
+
+## Unknown Keys
+
+The configurator rejects unknown parameters:
+
+```bash
+python train.py --unknown_param=123
+```
+
+```
+ValueError: Unknown config key: unknown_param
+```
+
+This prevents typos and ensures all parameters are documented in the script.
+
+## Examples
+
+### Simple Training Run
+
+```bash
+# Use defaults
+python train.py
+
+# Override batch size
+python train.py --batch_size=64
+
+# Multiple overrides
+python train.py --batch_size=64 --learning_rate=1e-3 --max_iters=10000
+```
+
+### Using Config Files
+
+```bash
+# Train on Shakespeare
+python train.py config/train_shakespeare_char.py
+
+# Train on Shakespeare with overrides
+python train.py config/train_shakespeare_char.py \
+  --max_iters=10000 --learning_rate=5e-4
+
+# Reproduce GPT-2
+torchrun --standalone --nproc_per_node=8 \
+  train.py config/train_gpt2.py
+```
+
+### Debugging and Prototyping
+
+```bash
+# Quick test on CPU
+python train.py config/train_shakespeare_char.py \
+  --device=cpu --compile=False \
+  --max_iters=100 --eval_interval=50
+
+# Small model for debugging
+python train.py \
+  --n_layer=2 --n_head=2 --n_embd=128 \
+  --batch_size=4 --block_size=64 \
+  --max_iters=100
+```
+
+### Finetuning Experiments
+
+```bash
+# Finetune with different learning rates
+python train.py config/finetune_shakespeare.py --learning_rate=1e-5
+python train.py config/finetune_shakespeare.py --learning_rate=3e-5
+python train.py config/finetune_shakespeare.py --learning_rate=1e-4
+
+# Finetune different model sizes
+python train.py config/finetune_shakespeare.py --init_from=gpt2
+python train.py config/finetune_shakespeare.py --init_from=gpt2-medium
+python train.py config/finetune_shakespeare.py --init_from=gpt2-large
+```
+
+### Sampling Configuration
+
+```bash
+# Sample with different temperatures
+python sample.py --out_dir=out-shakespeare-char --temperature=0.7
+python sample.py --out_dir=out-shakespeare-char --temperature=1.0
+python sample.py --out_dir=out-shakespeare-char --temperature=1.5
+
+# Generate many samples
+python sample.py --init_from=gpt2 \
+  --num_samples=50 --max_new_tokens=200
+```
+
+## Creating Config Files
+
+Config files are just Python scripts:
+
+```python
+# my_config.py - Custom configuration
+
+# I/O
+out_dir = 'out-my-experiment'
+eval_interval = 500
+log_interval = 10
+
+# Data
+dataset = 'my_dataset'
+batch_size = 32
+block_size = 512
+gradient_accumulation_steps = 2
+
+# Model architecture
+n_layer = 8
+n_head = 8
+n_embd = 512
+dropout = 0.1
+bias = False
+
+# Optimizer
+learning_rate = 3e-4
+max_iters = 10000
+weight_decay = 0.1
+beta1 = 0.9
+beta2 = 0.95
+
+# Learning rate schedule
+warmup_iters = 1000
+lr_decay_iters = 10000
+min_lr = 3e-5
+
+# System
+device = 'cuda'
+dtype = 'bfloat16'
+compile = True
+
+# Logging
+wandb_log = True
+wandb_project = 'my-project'
+wandb_run_name = 'my-experiment-v1'
+```
+
+Use it:
+```bash
+python train.py my_config.py
+```
+
+## Limitations
+
+1. **Global Namespace**: Modifies global variables, which some consider unpythonic
+2. **No Nested Config**: No support for nested/hierarchical configuration
+3. **Type Strictness**: Must match exact types (can't pass int for float parameter)
+4. **No Validation**: Beyond type checking, no semantic validation (e.g., `batch_size > 0`)
+5. **Single Config File**: Can't compose multiple config files
+
+## Best Practices
+
+### Organize Config Files
+
+```bash
+config/
+  train_shakespeare_char.py   # Quick start
+  train_gpt2.py               # Full reproduction
+  finetune_shakespeare.py     # Finetuning example
+  eval_gpt2.py                # Evaluation
+  debug.py                    # Fast debugging config
+```
+
+### Document Your Configs
+
+```python
+# config/my_experiment.py
+# Experiment: Testing dropout rates for overfitting
+# Dataset: Shakespeare
+# Goal: Find optimal dropout for small dataset
+
+out_dir = 'out-dropout-experiment'
+dataset = 'shakespeare_char'
+
+# Test dropout=0.3 (higher than default)
+dropout = 0.3
+
+# Small model to see overfitting clearly
+n_layer = 4
+n_head = 4
+n_embd = 256
+
+# Train longer to see overfitting
+max_iters = 10000
+```
+
+### Version Control Configs
+
+Commit config files to track experiment settings:
+
+```bash
+git add config/my_experiment.py
+git commit -m "Add config for dropout experiment"
+```
+
+### Use Descriptive Names
+
+```bash
+# Good
+config/train_shakespeare_small_gpu.py
+config/finetune_gpt2_medium_on_code.py
+config/eval_gpt2_xl_with_dropout.py
+
+# Bad
+config/config1.py
+config/test.py
+config/new.py
+```
+
+## See Also
+
+- [Training Documentation](/api/training) - All available training parameters
+- [Sampling Documentation](/api/sampling) - All available sampling parameters
+- [Model API](/api/model) - Understanding model architecture parameters
+
+## Alternative Approaches
+
+If you prefer a more structured config system:
+
+1. **dataclasses**: Create a config dataclass
+2. **argparse**: Replace configurator with argparse
+3. **hydra**: Use Facebook's Hydra for complex configs
+4. **yaml/json**: Store configs in YAML/JSON files
+
+The current system prioritizes simplicity and readability over features.

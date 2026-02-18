@@ -1,0 +1,330 @@
+---
+title: 'Data Preparation'
+description: 'Learn how to prepare and tokenize datasets for training nanoGPT models'
+icon: 'database'
+---
+
+Properly preparing your training data is crucial for successful GPT training. nanoGPT expects data in a specific binary format with tokenized sequences.
+
+## Overview
+
+Data preparation in nanoGPT involves:
+
+1. Downloading or collecting raw text data
+2. Tokenizing the text into integer IDs
+3. Splitting into train and validation sets
+4. Saving as binary `.bin` files
+5. Optionally creating a `meta.pkl` file with vocabulary information
+
+## Tokenization Approaches
+
+nanoGPT supports two main tokenization strategies:
+
+<Tabs>
+  <Tab title="Character-Level">
+    Character-level tokenization maps each unique character to an integer. This is simple and fast, perfect for smaller datasets or educational purposes.
+
+    **Advantages:**
+    - Simple implementation
+    - Small vocabulary size
+    - No external dependencies
+    - Works well for constrained domains
+
+    **Disadvantages:**
+    - Longer sequences (more tokens per text)
+    - Less efficient for large-scale training
+  </Tab>
+  
+  <Tab title="BPE (Byte-Pair Encoding)">
+    BPE tokenization uses subword units, providing a balance between character and word-level approaches. nanoGPT uses the GPT-2 BPE tokenizer from OpenAI.
+
+    **Advantages:**
+    - Shorter sequences (fewer tokens per text)
+    - Better for large-scale training
+    - Handles rare words gracefully
+    - Compatible with pretrained GPT-2 models
+
+    **Disadvantages:**
+    - Requires tiktoken library
+    - Slightly more complex
+    - Fixed vocabulary (50,257 tokens)
+  </Tab>
+</Tabs>
+
+## Preparing the Shakespeare Dataset
+
+Let's walk through preparing the Tiny Shakespeare dataset with character-level tokenization.
+
+<Steps>
+  <Step title="Run the preparation script">
+    Navigate to the Shakespeare character dataset directory and run the prepare script:
+    
+    ```bash
+    python data/shakespeare_char/prepare.py
+    ```
+    
+    This script will:
+    - Download the Tiny Shakespeare text (~1.1MB)
+    - Extract unique characters (65 total)
+    - Create character-to-integer mappings
+    - Split into 90% train / 10% validation
+  </Step>
+
+  <Step title="Character encoding">
+    The script creates simple encoding/decoding functions:
+    
+    ```python data/shakespeare_char/prepare.py
+    # create a mapping from characters to integers
+    stoi = { ch:i for i,ch in enumerate(chars) }
+    itos = { i:ch for i,ch in enumerate(chars) }
+    
+    def encode(s):
+        return [stoi[c] for c in s]  # string -> list of ints
+    
+    def decode(l):
+        return ''.join([itos[i] for i in l])  # list of ints -> string
+    ```
+  </Step>
+
+  <Step title="Create binary files">
+    The tokenized data is saved as binary files:
+    
+    ```python data/shakespeare_char/prepare.py
+    # export to bin files
+    train_ids = np.array(train_ids, dtype=np.uint16)
+    val_ids = np.array(val_ids, dtype=np.uint16)
+    train_ids.tofile('train.bin')
+    val_ids.tofile('val.bin')
+    ```
+    
+    **Output:**
+    - `train.bin` - 1,003,854 tokens
+    - `val.bin` - 111,540 tokens
+  </Step>
+
+  <Step title="Save vocabulary metadata">
+    A pickle file stores the vocabulary for later decoding:
+    
+    ```python data/shakespeare_char/prepare.py
+    meta = {
+        'vocab_size': vocab_size,
+        'itos': itos,  # int to string mapping
+        'stoi': stoi,  # string to int mapping
+    }
+    with open('meta.pkl', 'wb') as f:
+        pickle.dump(meta, f)
+    ```
+  </Step>
+</Steps>
+
+## Preparing OpenWebText with BPE
+
+For large-scale training, use BPE tokenization with the OpenWebText dataset:
+
+<Steps>
+  <Step title="Run the preparation script">
+    ```bash
+    python data/openwebtext/prepare.py
+    ```
+    
+    <Warning>
+      This downloads ~54GB of data and takes significant time and disk space.
+    </Warning>
+  </Step>
+
+  <Step title="Load and split the dataset">
+    ```python data/openwebtext/prepare.py
+    from datasets import load_dataset
+    
+    # Load ~8M documents from HuggingFace
+    dataset = load_dataset("openwebtext", num_proc=8)
+    
+    # Create 0.05% validation split
+    split_dataset = dataset["train"].train_test_split(
+        test_size=0.0005, seed=2357, shuffle=True
+    )
+    split_dataset['val'] = split_dataset.pop('test')
+    ```
+    
+    **Result:**
+    - Train: 8,009,762 documents
+    - Val: 4,007 documents
+  </Step>
+
+  <Step title="Tokenize with GPT-2 BPE">
+    ```python data/openwebtext/prepare.py
+    import tiktoken
+    enc = tiktoken.get_encoding("gpt2")
+    
+    def process(example):
+        # encode_ordinary ignores special tokens
+        ids = enc.encode_ordinary(example['text'])
+        # Add end-of-text token (50256 for GPT-2)
+        ids.append(enc.eot_token)
+        out = {'ids': ids, 'len': len(ids)}
+        return out
+    
+    tokenized = split_dataset.map(
+        process,
+        remove_columns=['text'],
+        desc="tokenizing the splits",
+        num_proc=8,
+    )
+    ```
+  </Step>
+
+  <Step title="Write binary files with memory mapping">
+    ```python data/openwebtext/prepare.py
+    for split, dset in tokenized.items():
+        arr_len = np.sum(dset['len'], dtype=np.uint64)
+        filename = f'{split}.bin'
+        dtype = np.uint16  # GPT-2 vocab (50256) fits in uint16
+        
+        # Use memory-mapped file for efficient writing
+        arr = np.memmap(filename, dtype=dtype, mode='w+', 
+                       shape=(arr_len,))
+        
+        # Write in batches for efficiency
+        idx = 0
+        for batch_idx in range(total_batches):
+            batch = dset.shard(num_shards=total_batches, 
+                             index=batch_idx, contiguous=True)
+            arr_batch = np.concatenate(batch['ids'])
+            arr[idx : idx + len(arr_batch)] = arr_batch
+            idx += len(arr_batch)
+        arr.flush()
+    ```
+    
+    **Output:**
+    - `train.bin` - ~17GB with 9,035,582,198 tokens
+    - `val.bin` - ~8.5MB with 4,434,897 tokens
+  </Step>
+</Steps>
+
+## File Formats
+
+### Binary Files (.bin)
+
+The `.bin` files contain raw sequences of token IDs stored as `uint16` (2 bytes per token):
+
+```python
+# Reading binary files later
+import numpy as np
+train_data = np.memmap('data/shakespeare/train.bin', 
+                       dtype=np.uint16, mode='r')
+```
+
+<Note>
+  Using `uint16` limits vocabulary to 65,536 tokens. GPT-2's 50,257 tokens fit comfortably, but larger vocabularies would need `uint32`.
+</Note>
+
+### Metadata File (meta.pkl)
+
+The optional `meta.pkl` file stores vocabulary information:
+
+```python
+meta = {
+    'vocab_size': 65,              # Number of unique tokens
+    'itos': {0: 'a', 1: 'b', ...}, # Index to token
+    'stoi': {'a': 0, 'b': 1, ...}, # Token to index
+}
+```
+
+**When is meta.pkl needed?**
+
+- **Required** for character-level models (custom vocabulary)
+- **Optional** for BPE models (uses tiktoken for encoding/decoding)
+- Used by `sample.py` for decoding generated tokens
+
+See the [train.py:138-144](/reference/train#meta-vocab) section for how the training script loads vocabulary information.
+
+## Custom Dataset Preparation
+
+To prepare your own dataset:
+
+<Steps>
+  <Step title="Choose your tokenization approach">
+    - **Character-level**: Good for small datasets (under 10MB), educational purposes
+    - **BPE**: Better for larger datasets, production use
+  </Step>
+
+  <Step title="Create your prepare.py script">
+    Use the Shakespeare or OpenWebText scripts as templates:
+    
+    ```python
+    import numpy as np
+    import tiktoken  # for BPE
+    
+    # 1. Load your raw text
+    with open('mydata.txt', 'r') as f:
+        data = f.read()
+    
+    # 2. Choose tokenizer
+    enc = tiktoken.get_encoding("gpt2")  # or custom char mapping
+    
+    # 3. Split train/val
+    n = len(data)
+    train_data = data[:int(n*0.9)]
+    val_data = data[int(n*0.9):]
+    
+    # 4. Tokenize
+    train_ids = enc.encode_ordinary(train_data)
+    val_ids = enc.encode_ordinary(val_data)
+    
+    # 5. Save as binary
+    np.array(train_ids, dtype=np.uint16).tofile('train.bin')
+    np.array(val_ids, dtype=np.uint16).tofile('val.bin')
+    ```
+  </Step>
+
+  <Step title="Place files in data directory">
+    ```
+    data/
+    └── mydataset/
+        ├── prepare.py
+        ├── train.bin
+        ├── val.bin
+        └── meta.pkl  (optional)
+    ```
+  </Step>
+
+  <Step title="Update training config">
+    Point to your dataset in config or command line:
+    
+    ```bash
+    python train.py --dataset=mydataset
+    ```
+  </Step>
+</Steps>
+
+## Tips and Best Practices
+
+<Tip>
+  **Train/Val Split**: Use 90-95% for training, 5-10% for validation. For very large datasets (>1GB), even 0.5% validation is sufficient.
+</Tip>
+
+<Tip>
+  **Memory-Mapped Files**: For datasets >1GB, use `np.memmap()` instead of loading everything into memory. nanoGPT's data loader uses this by default.
+</Tip>
+
+<Tip>
+  **Vocabulary Size**: Choose vocab sizes that are multiples of 64 for better GPU efficiency. GPT-2's 50,257 is padded to 50,304 in nanoGPT (see [train.py:154](/reference/train#vocab-size)).
+</Tip>
+
+<Warning>
+  Always verify your binary files are created correctly by reading back a few tokens and checking they match your expected output.
+</Warning>
+
+## Next Steps
+
+Once your data is prepared:
+
+1. [Start training](/guides/training) with your dataset
+2. [Monitor training progress](/guides/training#logging-and-monitoring)
+3. [Generate samples](/guides/sampling) from your trained model
+
+## Related
+
+- [Training Guide](/guides/training) - Start training on your prepared data
+- [Configuration](/reference/configuration) - Dataset configuration options
+- [Troubleshooting](/troubleshooting/common-issues) - Common data preparation issues

@@ -1,653 +1,454 @@
 ---
-title: Distributed Training with DDP
-description: Scale training across multiple GPUs and nodes using PyTorch Distributed Data Parallel
+title: Distributed Training
+description: Scale training across multiple GPUs and nodes with PyTorch DDP
 ---
 
-# Distributed Training with DDP
+## Overview
 
-nanoGPT uses PyTorch's Distributed Data Parallel (DDP) to scale training across multiple GPUs and nodes. This guide covers everything from single-node multi-GPU training to large-scale multi-node clusters.
+nanoGPT supports distributed training via PyTorch's Distributed Data Parallel (DDP). This enables:
 
-## What is DDP?
+- **Multi-GPU training** on a single node
+- **Multi-node training** across cluster nodes
+- **Linear scaling** of throughput with GPUs
+- **Efficient gradient synchronization** via NCCL
 
-Distributed Data Parallel enables:
+<Info>
+Distributed training is automatically detected when `RANK` environment variable is set by `torchrun`. No code changes are needed - the same `train.py` works for both single-GPU and distributed training.
+</Info>
 
-<CardGroup cols={2}>
-  <Card title="Data Parallelism" icon="database">
-    Each GPU processes a different batch of data
-  </Card>
+## Quick Start
+
+<Tabs>
+  <Tab title="Single Node (8 GPUs)">
+    ```bash
+    torchrun --standalone --nproc_per_node=8 train.py
+    ```
+  </Tab>
   
-  <Card title="Gradient Synchronization" icon="sync">
-    Gradients are averaged across all GPUs after each backward pass
-  </Card>
+  <Tab title="Single Node (4 GPUs)">
+    ```bash
+    torchrun --standalone --nproc_per_node=4 train.py
+    ```
+  </Tab>
   
-  <Card title="Linear Speedup" icon="rocket">
-    Near-perfect scaling with more GPUs (with fast interconnect)
-  </Card>
-  
-  <Card title="Identical Replicas" icon="clone">
-    All GPUs maintain identical model weights
-  </Card>
-</CardGroup>
+  <Tab title="Multi-Node (2 nodes, 8 GPUs each)">
+    ```bash
+    # On master node (IP: 123.456.123.456)
+    torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
+        --master_addr=123.456.123.456 --master_port=1234 train.py
+    
+    # On worker node
+    torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 \
+        --master_addr=123.456.123.456 --master_port=1234 train.py
+    ```
+  </Tab>
+</Tabs>
 
-## Architecture Overview
+## Single Node Multi-GPU Setup
 
-From `train.py:82-100`:
+### Using torchrun (Recommended)
+
+The `torchrun` utility (PyTorch 1.10+) simplifies DDP setup by automatically setting environment variables:
+
+```bash
+# Train GPT-2 on 8 GPUs
+torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+```
+
+**What `torchrun` does:**
+- Sets `RANK`, `LOCAL_RANK`, `WORLD_SIZE` environment variables
+- Manages process spawning and synchronization
+- Handles failures and restarts gracefully
+
+### DDP Initialization (train.py:82-95)
+
+The training script automatically detects DDP mode:
 
 ```python
-ddp = int(os.environ.get('RANK', -1)) != -1  # is this a ddp run?
+# Check if this is a DDP run
+ddp = int(os.environ.get('RANK', -1)) != -1
 
 if ddp:
-    init_process_group(backend=backend)
+    init_process_group(backend=backend)  # backend='nccl'
     ddp_rank = int(os.environ['RANK'])
     ddp_local_rank = int(os.environ['LOCAL_RANK'])
     ddp_world_size = int(os.environ['WORLD_SIZE'])
     device = f'cuda:{ddp_local_rank}'
     torch.cuda.set_device(device)
-    master_process = ddp_rank == 0
-    seed_offset = ddp_rank
+    master_process = ddp_rank == 0  # Only rank 0 does logging/checkpointing
+    seed_offset = ddp_rank  # Each process gets different seed
     
     # Scale down gradient accumulation per process
     assert gradient_accumulation_steps % ddp_world_size == 0
     gradient_accumulation_steps //= ddp_world_size
 else:
+    # Single GPU mode
     master_process = True
     seed_offset = 0
     ddp_world_size = 1
 ```
 
-**Key concepts:**
-- **RANK**: Global process ID (0 to world_size-1)
-- **LOCAL_RANK**: GPU ID on current node (0 to gpus_per_node-1)
-- **WORLD_SIZE**: Total number of processes across all nodes
-- **Master process** (rank 0): Handles logging, checkpointing, evaluation
+<Note>
+**Key Design Choices:**
+- Only rank 0 process performs logging and checkpointing
+- Each process gets a different random seed for data sampling
+- Gradient accumulation steps are divided among processes
+- Effective batch size remains constant regardless of world size
+</Note>
 
-## Single-Node Multi-GPU Training
+### Wrapping Model with DDP
 
-### Basic Usage
-
-Train on all GPUs in a single machine:
-
-```bash
-torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
-```
-
-**Arguments:**
-- `--standalone`: Single-node mode (simpler, no network config needed)
-- `--nproc_per_node=8`: Number of GPUs to use (8 in this example)
-
-<Info>
-  `torchrun` automatically sets environment variables (`RANK`, `LOCAL_RANK`, `WORLD_SIZE`) that nanoGPT detects to enable DDP mode.
-</Info>
-
-### Automatic Gradient Accumulation Scaling
-
-Gradient accumulation steps are automatically divided by the number of GPUs:
+After model initialization and compilation, wrap with DDP:
 
 ```python
-# config/train_gpt2.py
-gradient_accumulation_steps = 5 * 8  # 40
-
-# With 8 GPUs: 40 / 8 = 5 steps per GPU
-# With 4 GPUs: 40 / 4 = 10 steps per GPU
-# With 1 GPU: 40 / 1 = 40 steps per GPU
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank])
 ```
 
-Effective batch size remains constant:
+### Gradient Synchronization
 
-```
-Effective batch = batch_size × block_size × gradient_accumulation_steps × num_gpus
-                = 12 × 1024 × 5 × 8
-                = 491,520 tokens/iteration
-```
+DDP only needs to sync gradients at the final gradient accumulation step:
 
-<Warning>
-  `gradient_accumulation_steps` must be divisible by `num_gpus`. Adjust in config file if needed.
-</Warning>
-
-### Examples by GPU Count
-
-<Tabs>
-  <Tab title="8 GPUs">
-    ```bash
-    # Full 8-GPU node
-    torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
-    ```
-    
-    **Performance:**
-    - Time per iter: ~140ms (with fast interconnect)
-    - Tokens/sec: ~3.5M
-    - Training time (GPT-2 124M): ~4 days
-  </Tab>
-  
-  <Tab title="4 GPUs">
-    ```bash
-    # Use 4 GPUs
-    torchrun --standalone --nproc_per_node=4 train.py config/train_gpt2.py
-    ```
-    
-    **Automatic adjustments:**
-    - `gradient_accumulation_steps`: 40 → 10 per GPU
-    - Effective batch size: unchanged
-    - Training time: ~8 days (2× longer)
-  </Tab>
-  
-  <Tab title="2 GPUs">
-    ```bash
-    # Use 2 GPUs
-    torchrun --standalone --nproc_per_node=2 train.py config/train_gpt2.py
-    ```
-    
-    **Automatic adjustments:**
-    - `gradient_accumulation_steps`: 40 → 20 per GPU
-    - Effective batch size: unchanged
-    - Training time: ~16 days (4× longer)
-  </Tab>
-</Tabs>
-
-### Selecting Specific GPUs
-
-Use `CUDA_VISIBLE_DEVICES` to select GPUs:
-
-```bash
-# Use GPUs 0, 1, 2, 3 (not 4, 5, 6, 7)
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 \
-  train.py config/train_gpt2.py
-
-# Use only GPUs 2 and 5
-CUDA_VISIBLE_DEVICES=2,5 torchrun --standalone --nproc_per_node=2 \
-  train.py config/train_gpt2.py
+```python
+for micro_step in range(gradient_accumulation_steps):
+    if ddp:
+        # Only sync gradients on the last micro step
+        model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
+    with ctx:
+        logits, loss = model(X, Y)
+        loss = loss / gradient_accumulation_steps
+    scaler.scale(loss).backward()
 ```
 
-## Multi-Node Distributed Training
+## Multi-Node Training
 
-### Two-Node Setup
-
-From `train.py:11-15`:
-
-```bash
-# Run on the first (master) node with example IP 123.456.123.456:
-torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
-  --master_addr=123.456.123.456 --master_port=1234 \
-  train.py config/train_gpt2.py
-
-# Run on the worker node:
-torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 \
-  --master_addr=123.456.123.456 --master_port=1234 \
-  train.py config/train_gpt2.py
-```
-
-**Arguments:**
-- `--nnodes=2`: Total number of nodes
-- `--node_rank=0`: Node ID (0 for master, 1+ for workers)
-- `--master_addr`: Master node's IP address
-- `--master_port`: Communication port (any free port)
-- `--nproc_per_node=8`: GPUs per node
+### Prerequisites
 
 <Steps>
-  <Step title="Identify Master Node IP">
-    On the master node, find its IP:
-    
+  <Step title="Network Connectivity">
+    Ensure all nodes can communicate:
     ```bash
-    hostname -I
-    # Or
-    ip addr show
+    # Test connectivity from worker to master
+    ping 123.456.123.456
     ```
   </Step>
   
-  <Step title="Launch Master Process">
-    On the master node:
-    
+  <Step title="Shared Filesystem (Optional)">
+    For checkpoint sharing, mount a shared filesystem like NFS:
     ```bash
-    torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
-      --master_addr=192.168.1.10 --master_port=29500 \
-      train.py config/train_gpt2.py
+    # All nodes should access the same --out_dir
+    --out_dir=/shared/nfs/nanogpt-checkpoints
     ```
   </Step>
   
-  <Step title="Launch Worker Processes">
-    On each worker node:
-    
+  <Step title="Firewall Configuration">
+    Open the master port (default: 1234) on the master node:
     ```bash
-    torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 \
-      --master_addr=192.168.1.10 --master_port=29500 \
-      train.py config/train_gpt2.py
+    # Example: open port 1234 TCP
+    sudo ufw allow 1234/tcp
     ```
-    
-    Increment `--node_rank` for each additional node (0, 1, 2, ...).
   </Step>
 </Steps>
 
-### Network Requirements
+### Launch Commands
 
-<Tabs>
-  <Tab title="Infiniband (Best)">
-    **Hardware:**
-    - Infiniband interconnect (100+ Gbps)
-    - RDMA support
-    
-    **Configuration:**
-    ```bash
-    # Use default NCCL settings (automatically uses Infiniband)
-    torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
-      --master_addr=192.168.1.10 --master_port=29500 \
-      train.py config/train_gpt2.py
-    ```
-    
-    **Performance:**
-    - Near-linear scaling across nodes
-    - ~5-10 GB/s gradient communication bandwidth
-    - Minimal overhead per additional node
-  </Tab>
-  
-  <Tab title="Ethernet (Moderate)">
-    **Hardware:**
-    - 10-100 Gbps Ethernet
-    - No Infiniband
-    
-    **Configuration:**
-    ```bash
-    # Disable Infiniband (train.py:16)
-    NCCL_IB_DISABLE=1 torchrun --nproc_per_node=8 --nnodes=2 \
-      --node_rank=0 --master_addr=192.168.1.10 --master_port=29500 \
-      train.py config/train_gpt2.py
-    ```
-    
-    **Performance:**
-    - Good scaling up to 4-8 nodes
-    - Communication bottleneck on 10Gbps
-    - May need to reduce `batch_size` or model size
-  </Tab>
-  
-  <Tab title="Slow Network (Poor)">
-    **Hardware:**
-    - 1 Gbps or slower
-    
-    **Not recommended:**
-    - Gradient synchronization dominates training time
-    - Near-zero speedup from additional nodes
-    - Use single-node training instead
-    
-    <Warning>
-      Benchmark your interconnect with `iperf3` before attempting multi-node training.
-    </Warning>
-  </Tab>
-</Tabs>
+#### Master Node
 
-### Verifying Network Performance
-
-Test bandwidth between nodes:
+Run on the first node (replace IP with your master node IP):
 
 ```bash
-# On master node
-iperf3 -s
-
-# On worker node
-iperf3 -c 192.168.1.10 -t 30
+torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
+    --master_addr=123.456.123.456 --master_port=1234 \
+    train.py config/train_gpt2.py
 ```
 
-Look for:
-- **100+ Gbps**: Excellent (Infiniband)
-- **10-100 Gbps**: Good (fast Ethernet)
-- **1-10 Gbps**: Poor (slow Ethernet)
-- **&lt;1 Gbps**: Unusable
+**Parameters:**
+- `--nproc_per_node=8`: Number of GPUs per node
+- `--nnodes=2`: Total number of nodes
+- `--node_rank=0`: This is the master (rank 0)
+- `--master_addr`: IP address of master node
+- `--master_port`: Port for inter-node communication
 
-## DDP Backend Configuration
+#### Worker Nodes
 
-From `train.py:70`:
+Run on each worker node:
+
+```bash
+# Worker node 1 (node_rank=1)
+torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 \
+    --master_addr=123.456.123.456 --master_port=1234 \
+    train.py config/train_gpt2.py
+
+# Worker node 2 (node_rank=2) if using 3 nodes
+torchrun --nproc_per_node=8 --nnodes=3 --node_rank=2 \
+    --master_addr=123.456.123.456 --master_port=1234 \
+    train.py config/train_gpt2.py
+```
+
+<Warning>
+All nodes must use identical command-line arguments (except `--node_rank`). Mismatched configs will cause training to hang or crash.
+</Warning>
+
+## NCCL Configuration
+
+### Backend Selection
+
+The DDP backend is configured in train.py:
 
 ```python
 backend = 'nccl'  # 'nccl', 'gloo', etc.
 ```
 
-<Tabs>
-  <Tab title="NCCL (Recommended)">
-    **NVIDIA Collective Communication Library**
-    
-    ```python
-    backend = 'nccl'
-    ```
-    
-    **Best for:**
-    - NVIDIA GPUs (required)
-    - CUDA tensors
-    - Single or multi-node
-    - Fastest gradient communication
-    
-    **Features:**
-    - Optimized for GPU-to-GPU communication
-    - Supports Infiniband RDMA
-    - Automatic topology detection
-  </Tab>
-  
-  <Tab title="Gloo">
-    **Facebook's collective communication library**
-    
-    ```python
-    backend = 'gloo'
-    ```
-    
-    **Best for:**
-    - CPU training
-    - Mixed CPU/GPU
-    - Non-NVIDIA hardware
-    
-    **Limitations:**
-    - Slower than NCCL for GPUs
-    - Less optimized for Infiniband
-  </Tab>
-</Tabs>
+**Available backends:**
+- **NCCL** (default): Optimized for NVIDIA GPUs, best performance
+- **Gloo**: CPU-based, works without GPUs but slower
+- **MPI**: For HPC clusters with MPI support
+
+### Infiniband Optimization
+
+For clusters **with** Infiniband interconnect:
+
+```bash
+# NCCL will automatically use Infiniband (best performance)
+torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
+    --master_addr=123.456.123.456 --master_port=1234 \
+    train.py
+```
+
+For clusters **without** Infiniband:
+
+```bash
+# Disable Infiniband to avoid errors
+NCCL_IB_DISABLE=1 torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
+    --master_addr=123.456.123.456 --master_port=1234 \
+    train.py
+```
+
+<Warning>
+**Important:** If you don't have Infiniband, you **must** set `NCCL_IB_DISABLE=1`. Otherwise, training may hang during gradient synchronization.
+
+Without Infiniband, multi-node training will be significantly slower due to network bottlenecks.
+</Warning>
+
+### Benchmarking Network
+
+Test your interconnect bandwidth:
+
+```bash
+# Install iperf3
+apt-get install iperf3
+
+# On master node: start server
+iperf3 -s
+
+# On worker node: run client
+iperf3 -c 123.456.123.456
+```
+
+**Expected bandwidth:**
+- Infiniband: 100+ Gbps
+- 10GbE network: ~10 Gbps
+- 1GbE network: ~1 Gbps (too slow for multi-node)
+
+### NCCL Environment Variables
+
+Useful NCCL tuning options:
+
+```bash
+# Disable Infiniband
+NCCL_IB_DISABLE=1
+
+# Enable debug logging
+NCCL_DEBUG=INFO
+
+# Use specific network interface
+NCCL_SOCKET_IFNAME=eth0
+
+# Increase timeout for slow networks (in milliseconds)
+NCCL_TIMEOUT=300000
+
+# Example: run with multiple NCCL settings
+NCCL_IB_DISABLE=1 NCCL_DEBUG=INFO torchrun \
+    --nproc_per_node=8 --nnodes=2 --node_rank=0 \
+    --master_addr=123.456.123.456 --master_port=1234 \
+    train.py
+```
+
+## Scaling Efficiency
+
+### Throughput Scaling
+
+With efficient communication, throughput should scale linearly:
+
+| Configuration | Tokens/sec | Speedup |
+|---------------|------------|----------|
+| 1 GPU | 50K | 1× |
+| 8 GPUs (1 node) | 400K | 8× |
+| 16 GPUs (2 nodes, IB) | 750K | 15× |
+| 16 GPUs (2 nodes, 10GbE) | 500K | 10× |
 
 <Note>
-  Always use `nccl` for GPU training unless you have a specific reason not to.
+**Communication Overhead:**
+- Single node: ~5% overhead (GPU-to-GPU via NVLink)
+- Multi-node (Infiniband): ~10-15% overhead
+- Multi-node (Ethernet): ~30-50% overhead
 </Note>
 
-## Gradient Synchronization
+### Monitoring DDP Performance
 
-From `train.py:294-298`:
-
-```python
-for micro_step in range(gradient_accumulation_steps):
-    if ddp:
-        # Only sync gradients at the last micro step
-        model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
-    with ctx:
-        logits, loss = model(X, Y)
-        loss = loss / gradient_accumulation_steps
-```
-
-**How it works:**
-
-1. **Micro-steps 0 to N-2**: 
-   - Each GPU accumulates gradients locally
-   - No communication between GPUs (fast)
-
-2. **Micro-step N-1** (last step):
-   - Gradients synchronized across all GPUs
-   - All-reduce operation averages gradients
-   - Every GPU ends up with identical gradients
-
-3. **Optimizer step**:
-   - Each GPU updates weights with averaged gradients
-   - All GPUs maintain identical weights
-
-<Info>
-  This optimization reduces communication overhead by N×, where N is `gradient_accumulation_steps`.
-</Info>
-
-## Checkpointing in DDP
-
-Only the master process saves checkpoints (train.py:263-286):
+Check for synchronization bottlenecks:
 
 ```python
-if iter_num % eval_interval == 0 and master_process:
-    losses = estimate_loss()
-    print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-    
-    if losses['val'] < best_val_loss or always_save_checkpoint:
-        best_val_loss = losses['val']
-        if iter_num > 0:
-            checkpoint = {
-                'model': raw_model.state_dict(),  # Unwrap DDP
-                'optimizer': optimizer.state_dict(),
-                'model_args': model_args,
-                'iter_num': iter_num,
-                'best_val_loss': best_val_loss,
-                'config': config,
-            }
-            print(f"saving checkpoint to {out_dir}")
-            torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
-```
-
-**Key points:**
-- Only `master_process` (rank 0) saves checkpoints
-- Prevents multiple processes from writing simultaneously
-- Unwraps DDP with `raw_model = model.module if ddp else model`
-
-### Loading Checkpoints in DDP
-
-Checkpoints work identically in single-GPU and DDP modes:
-
-```bash
-# Resume training (automatically detects DDP)
-torchrun --standalone --nproc_per_node=8 train.py \
-  config/train_gpt2.py --init_from=resume
-```
-
-All processes load the same checkpoint, ensuring weight synchronization.
-
-## Performance Optimization
-
-### Maximize GPU Utilization
-
-**Check GPU usage:**
-
-```bash
-watch -n 1 nvidia-smi
+# Enable NCCL timing
+NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=COLL torchrun ...
 ```
 
 Look for:
-- **GPU-Util**: Should be 95-100% during training
-- **Memory-Usage**: Should be 80-95% of total
-- **Power**: Near TDP (e.g., 300-400W for A100)
-
-**Low GPU utilization?**
-
-- **Increase `batch_size`**: Utilize more GPU memory
-- **Reduce `gradient_accumulation_steps`**: More frequent GPU work
-- **Enable `torch.compile`**: 40% speedup
-- **Check data loading**: Use `benchmark.py` to isolate bottlenecks
-
-### Batch Size Tuning
-
-Larger batches = better GPU utilization:
-
-```bash
-# Try increasing batch size until OOM
-python train.py config/train_gpt2.py --batch_size=16  # OOM?
-python train.py config/train_gpt2.py --batch_size=14  # Still OOM?
-python train.py config/train_gpt2.py --batch_size=12  # Good!
-```
-
-Then adjust `gradient_accumulation_steps` to maintain effective batch size:
-
-```python
-# If you increased batch_size from 12 to 16:
-# Decrease gradient_accumulation_steps from 40 to 30
-# Effective batch: 16 * 30 * 8 = 3,840 (same as 12 * 40 * 8)
-```
-
-### NCCL Optimization
-
-Enable NCCL tuning environment variables:
-
-```bash
-export NCCL_DEBUG=INFO                    # Debug NCCL issues
-export NCCL_IB_DISABLE=1                  # Disable Infiniband (if no IB)
-export NCCL_P2P_DISABLE=1                 # Disable peer-to-peer (if issues)
-export NCCL_SOCKET_IFNAME=eth0            # Specify network interface
-export NCCL_IB_GID_INDEX=3                # Infiniband GID (if using IB)
-```
-
-### Benchmark Your Setup
-
-Use `bench.py` to isolate training performance:
-
-```bash
-torchrun --standalone --nproc_per_node=8 bench.py
-```
-
-Compare:
-- **Single GPU**: Baseline throughput
-- **8 GPUs**: Should be ~7-8× faster (near-linear)
-- **Multi-node**: Check for communication overhead
-
-## Monitoring and Debugging
-
-### Check Process Status
-
-```bash
-# See all Python processes
-ps aux | grep python
-
-# Should see 8 processes (for 8 GPUs)
-ps aux | grep train.py | wc -l
-```
-
-### Monitor GPU Communication
-
-```bash
-# NCCL debug output
-NCCL_DEBUG=INFO torchrun --standalone --nproc_per_node=8 \
-  train.py config/train_gpt2.py
-```
-
-Look for:
-- "Using network" messages (should show Infiniband or IP)
-- Communication time (should be &lt;10ms per all-reduce)
-- Warnings about slow links
-
-### Verify Identical Weights
-
-Ensure all GPUs have synchronized weights:
-
-```python
-# Add to train.py after checkpoint save
-if ddp:
-    # Check weight hash across GPUs
-    weight_hash = hash(str(model.state_dict()))
-    print(f"Rank {ddp_rank} weight hash: {weight_hash}")
-```
-
-All ranks should print identical hashes.
+- Long `ncclAllReduce` times: Network bottleneck
+- GPU utilization drops: Waiting for gradient sync
+- Uneven iteration times: Load imbalance
 
 ## Troubleshooting
 
-### Processes Hang at Startup
+<AccordionGroup>
+  <Accordion title="Training hangs at initialization">
+    **Causes:**
+    - Firewall blocking master port
+    - Wrong master IP address
+    - Network connectivity issues
+    
+    **Solutions:**
+    ```bash
+    # Test connectivity
+    ping <master_addr>
+    telnet <master_addr> <master_port>
+    
+    # Check firewall
+    sudo ufw status
+    sudo ufw allow <master_port>/tcp
+    
+    # Enable NCCL debug logging
+    NCCL_DEBUG=INFO torchrun ...
+    ```
+  </Accordion>
+  
+  <Accordion title="NCCL errors or hangs during training">
+    **Causes:**
+    - Infiniband misconfiguration
+    - Network instability
+    - Different CUDA versions across nodes
+    
+    **Solutions:**
+    ```bash
+    # Disable Infiniband if not available
+    NCCL_IB_DISABLE=1 torchrun ...
+    
+    # Use TCP sockets explicitly
+    NCCL_SOCKET_IFNAME=eth0 torchrun ...
+    
+    # Increase timeout
+    NCCL_TIMEOUT=600000 torchrun ...
+    ```
+  </Accordion>
+  
+  <Accordion title="Out of memory on some GPUs">
+    **Causes:**
+    - Uneven data distribution
+    - Rank 0 does extra work (logging)
+    
+    **Solutions:**
+    ```bash
+    # Reduce batch size slightly
+    --batch_size=10  # instead of 12
+    
+    # Reduce gradient accumulation
+    --gradient_accumulation_steps=32  # instead of 40
+    ```
+  </Accordion>
+  
+  <Accordion title="Slower than expected throughput">
+    **Causes:**
+    - Data loading bottleneck
+    - Network bandwidth limit
+    - Inefficient gradient accumulation
+    
+    **Solutions:**
+    ```bash
+    # Benchmark network
+    iperf3 -c <master_addr>
+    
+    # Check GPU utilization
+    nvidia-smi dmon -s u
+    
+    # Profile training
+    python bench.py  # simplified training loop
+    ```
+  </Accordion>
+</AccordionGroup>
 
-**Symptoms:**
-- Processes start but don't print anything
-- `nvidia-smi` shows idle GPUs
-
-**Causes:**
-- Wrong `master_addr` or `master_port`
-- Firewall blocking communication
-- Mismatched `nnodes` or `node_rank`
-
-**Solutions:**
-```bash
-# Test network connectivity
-ping 192.168.1.10
-
-# Check firewall
-sudo ufw status
-
-# Try different port
---master_port=29501
-```
-
-### Slow Multi-Node Training
-
-**Symptoms:**
-- Adding nodes doesn't improve speed
-- High communication time
-
-**Causes:**
-- Slow network (< 10 Gbps)
-- No Infiniband on multi-node setup
-- Large models with small batches
-
-**Solutions:**
-```bash
-# Disable Infiniband if not available
-NCCL_IB_DISABLE=1 torchrun ...
-
-# Increase batch size to reduce communication ratio
---batch_size=16 --gradient_accumulation_steps=20
-
-# Use fewer nodes if network is slow
-```
-
-### Out of Memory in DDP
-
-**Symptoms:**
-- OOM error during training
-- Works on single GPU but not DDP
-
-**Causes:**
-- DDP has small overhead (~100MB per GPU)
-
-**Solutions:**
-```bash
-# Reduce batch size slightly
---batch_size=10  # was 12
-
-# Reduce model size
---n_layer=10  # was 12
-```
-
-### NaN Loss in DDP
-
-**Symptoms:**
-- Loss becomes NaN after some iterations
-- Works on single GPU
-
-**Causes:**
-- Gradient synchronization issues
-- Numerical instability with large world size
-
-**Solutions:**
-```bash
-# Reduce learning rate
---learning_rate=3e-4  # was 6e-4
-
-# Enable gradient clipping
---grad_clip=1.0
-
-# Use float32 for debugging
---dtype=float32
-```
-
-## Advanced Topics
-
-### Elastic Training
-
-Add/remove nodes during training (requires code modifications and checkpointing).
-
-### Gradient Compression
-
-Reduce communication with compressed gradients (not implemented in nanoGPT).
-
-### Pipeline Parallelism
-
-Split model across GPUs (different from data parallelism, not in nanoGPT).
-
-### FSDP (Future)
-
-From `README.md:213`:
-
-> TODO: Investigate and add FSDP instead of DDP
-
-Fully Sharded Data Parallel enables training larger models by sharding weights across GPUs.
-
-## Next Steps
+## Best Practices
 
 <CardGroup cols={2}>
-  <Card title="Training Overview" icon="book" href="/training/overview">
-    Understand nanoGPT's training architecture
+  <Card title="Use torchrun" icon="play">
+    Always use `torchrun` instead of `python -m torch.distributed.launch` (deprecated)
   </Card>
   
-  <Card title="GPT-2 Reproduction" icon="robot" href="/training/gpt2-reproduction">
-    Full guide to reproducing GPT-2 with DDP
+  <Card title="Test Single Node First" icon="flask">
+    Verify training works on single node before scaling to multi-node
+  </Card>
+  
+  <Card title="Monitor Network" icon="chart-line">
+    Use `iperf3` and `NCCL_DEBUG=INFO` to identify communication bottlenecks
+  </Card>
+  
+  <Card title="Shared Checkpoints" icon="floppy-disk">
+    Use shared filesystem or cloud storage for `--out_dir` across nodes
   </Card>
 </CardGroup>
 
-## Key Takeaways
+## Example: 4-Node Training
 
-- DDP provides near-linear scaling with fast interconnect (Infiniband)
-- Use `torchrun` to launch distributed training
-- `gradient_accumulation_steps` automatically scales with GPU count
-- Only master process handles logging and checkpointing
-- NCCL backend is required for optimal GPU communication
-- Verify network bandwidth with `iperf3` before multi-node training
-- Gradient synchronization only happens at the last micro-step
-- Multi-node training requires fast interconnect (10+ Gbps)
+Training GPT-2 on 4 nodes × 8 GPUs = 32 GPUs:
+
+```bash
+# Node 0 (master): IP 192.168.1.10
+NCCL_IB_DISABLE=1 torchrun \
+    --nproc_per_node=8 --nnodes=4 --node_rank=0 \
+    --master_addr=192.168.1.10 --master_port=29500 \
+    train.py config/train_gpt2.py --gradient_accumulation_steps=10
+
+# Node 1 (worker): IP 192.168.1.11
+NCCL_IB_DISABLE=1 torchrun \
+    --nproc_per_node=8 --nnodes=4 --node_rank=1 \
+    --master_addr=192.168.1.10 --master_port=29500 \
+    train.py config/train_gpt2.py --gradient_accumulation_steps=10
+
+# Node 2 (worker): IP 192.168.1.12
+NCCL_IB_DISABLE=1 torchrun \
+    --nproc_per_node=8 --nnodes=4 --node_rank=2 \
+    --master_addr=192.168.1.10 --master_port=29500 \
+    train.py config/train_gpt2.py --gradient_accumulation_steps=10
+
+# Node 3 (worker): IP 192.168.1.13
+NCCL_IB_DISABLE=1 torchrun \
+    --nproc_per_node=8 --nnodes=4 --node_rank=3 \
+    --master_addr=192.168.1.10 --master_port=29500 \
+    train.py config/train_gpt2.py --gradient_accumulation_steps=10
+```
+
+**Result:**
+- 32 GPUs total
+- Gradient accumulation reduced from 40 to 10 (40 / 4 nodes)
+- Effective batch size: 12 × 1024 × 10 × 32 = 3.93M tokens/iter
+- Training time: ~1 day (4× speedup vs single node)
+
+## Cleanup
+
+After training completes:
+
+```python
+if ddp:
+    destroy_process_group()  # Clean up DDP resources
+```
+
+This is automatically called at the end of train.py:336.

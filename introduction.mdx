@@ -1,119 +1,64 @@
 ---
-title: Introduction to nanoGPT
-description: The simplest, fastest repository for training and finetuning medium-sized GPT models
+title: Introduction
+description: The simplest, fastest repository for training/finetuning medium-sized GPTs
 ---
 
-# Welcome to nanoGPT
-
-nanoGPT is the simplest, fastest repository for training and finetuning medium-sized GPT models. It prioritizes simplicity and performance, making it easy to hack and adapt to your needs.
-
 <Note>
-  **Update Nov 2025**: nanoGPT has a new and improved cousin called [nanochat](https://github.com/karpathy/nanochat). For new projects, consider using nanochat instead. nanoGPT is maintained for posterity and remains an excellent learning resource.
+  **Update Nov 2025:** nanoGPT has a new and improved cousin called [nanochat](https://github.com/karpathy/nanochat). It is very likely you meant to use/find nanochat instead. nanoGPT (this repo) is now very old and deprecated but I will leave it up for posterity.
 </Note>
 
-## What Makes nanoGPT Special?
+## Overview
 
-nanoGPT is a complete rewrite of minGPT that prioritizes practicality over education. The entire codebase consists of:
+The simplest, fastest repository for training/finetuning medium-sized GPTs. It is a rewrite of [minGPT](https://github.com/karpathy/minGPT) that prioritizes teeth over education. 
 
-- **~300 lines** in `train.py` - A clean, boilerplate training loop
-- **~300 lines** in `model.py` - Complete GPT model definition with optional GPT-2 weight loading
+The code itself is remarkably concise and readable:
+- `train.py` - **~300 lines** of boilerplate training loop
+- `model.py` - **~300 lines** GPT model definition
 
-Because the code is so simple and readable, it's extremely easy to:
-- Train new models from scratch
-- Finetune pretrained checkpoints
-- Experiment with architectural modifications
-- Understand every detail of the implementation
+Despite its simplicity, nanoGPT reproduces **GPT-2 (124M)** on OpenWebText, running on a single 8XA100 40GB node in about 4 days of training.
+
+## What Makes nanoGPT Special
+
+<CardGroup cols={2}>
+  <Card title="Simple & Readable" icon="code">
+    Plain Python code that's easy to understand and hack. No complicated abstractions or frameworks.
+  </Card>
+  <Card title="Fast & Efficient" icon="bolt">
+    Reproduces GPT-2 124M results. Supports PyTorch 2.0 compile for significant speedups.
+  </Card>
+  <Card title="Highly Hackable" icon="wrench">
+    Easy to modify for your needs. Train new models from scratch or finetune pretrained checkpoints.
+  </Card>
+  <Card title="Production Ready" icon="rocket">
+    Supports distributed training with DDP, multinode setups, and can optionally load GPT-2 weights from OpenAI.
+  </Card>
+</CardGroup>
 
 ## Key Features
 
-<CardGroup cols={2}>
-  <Card title="Simple & Readable" icon="code" href="/model/architecture">
-    Just ~600 lines of clean, hackable code. No complex abstractions or unnecessary frameworks.
-  </Card>
-  
-  <Card title="Fast Training" icon="bolt" href="/training/overview">
-    Reproduces GPT-2 (124M) in ~4 days on 8xA100. Optimized with PyTorch 2.0 compile and Flash Attention.
-  </Card>
-  
-  <Card title="Easy Finetuning" icon="wand-magic-sparkles" href="/training/finetuning">
-    Start from pretrained GPT-2 weights (up to 1.3B params) and finetune on your custom datasets.
-  </Card>
-  
-  <Card title="Quick Start" icon="rocket" href="/quickstart">
-    Train a character-level Shakespeare model in under 3 minutes on a single GPU.
-  </Card>
-</CardGroup>
+- **Minimal dependencies** - Just PyTorch, NumPy, and a few utilities
+- **Character-level and BPE tokenization** - Start simple or use OpenAI's fast BPE tokenizer
+- **Multiple training modes** - Train from scratch, finetune pretrained models, or evaluate baselines
+- **Cross-platform support** - Works on GPU (CUDA), CPU, and Apple Silicon (MPS)
+- **Distributed training** - Built-in support for PyTorch DDP and multi-node training
+- **Optional logging** - Integration with Weights & Biases for experiment tracking
 
-## What Can You Build?
-
-### Character-Level Text Generation
-Train a baby GPT on Shakespeare in minutes:
-```python
-python data/shakespeare_char/prepare.py
-python train.py config/train_shakespeare_char.py
-python sample.py --out_dir=out-shakespeare-char
-```
-
-### GPT-2 Reproduction
-Fully reproduce GPT-2 (124M parameters) results on OpenWebText:
-```bash
-python data/openwebtext/prepare.py
-torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
-```
-
-### Custom Finetuning
-Finetune pretrained GPT-2 models on your own text:
-```python
-python train.py config/finetune_shakespeare.py
-```
-
-## Performance Highlights
-
-- **PyTorch 2.0 Compile**: One line of code cuts iteration time from ~250ms to ~135ms
-- **Flash Attention**: Automatic use of optimized CUDA kernels for faster training
-- **Distributed Training**: Built-in support for multi-GPU and multi-node training with DDP
-- **Apple Silicon Support**: Use `--device=mps` for 2-3x faster training on M1/M2/M3 Macs
-
-## Baseline Results
-
-Validation loss on OpenWebText for different GPT-2 model sizes:
-
-| Model | Parameters | Train Loss | Val Loss |
-|-------|------------|------------|----------|
-| gpt2 | 124M | 3.11 | 3.12 |
-| gpt2-medium | 350M | 2.85 | 2.84 |
-| gpt2-large | 774M | 2.66 | 2.67 |
-| gpt2-xl | 1558M | 2.56 | 2.54 |
-
-## Who Is This For?
-
-**Perfect for:**
-- Researchers wanting a hackable GPT implementation
-- Students learning about transformers and language models
-- Engineers building custom text generation solutions
-- Anyone who wants to understand GPTs from first principles
-
-**Not recommended if:**
-- You need production-ready, battle-tested code (consider Hugging Face Transformers)
-- You want a high-level API with lots of abstractions
-- You're starting a new project (consider nanochat instead)
-
-## Next Steps
+## Get Started
 
 <CardGroup cols={3}>
+  <Card title="Quickstart" icon="play" href="/quickstart">
+    Train your first character-level GPT on Shakespeare in 3 minutes
+  </Card>
   <Card title="Installation" icon="download" href="/installation">
-    Install dependencies and set up your environment
+    Set up your environment and install dependencies
   </Card>
-  
-  <Card title="Quick Start" icon="play" href="/quickstart">
-    Train your first model in under 5 minutes
-  </Card>
-  
-  <Card title="Architecture" icon="diagram-project" href="/model/architecture">
-    Understand the GPT implementation
+  <Card title="Training Guide" icon="graduation-cap" href="/training">
+    Learn how to train and finetune GPT models
   </Card>
 </CardGroup>
 
-<Note>
-  For questions and discussions, join the **#nanoGPT** channel on [Discord](https://discord.gg/3zy8kqD9Cp)
-</Note>
+## Community & Support
+
+For more context on this repository, GPT, and language modeling, watch Andrej Karpathy's [Zero To Hero series](https://karpathy.ai/zero-to-hero.html). The [GPT video](https://www.youtube.com/watch?v=kCc8FmEb1nY) is particularly helpful if you have prior language modeling context.
+
+Join the discussion on Discord: [#nanoGPT](https://discord.gg/3zy8kqD9Cp)

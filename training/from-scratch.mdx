@@ -1,0 +1,327 @@
+---
+title: Training from Scratch
+description: Reproducing GPT-2 124M on OpenWebText from scratch
+---
+
+## GPT-2 Reproduction
+
+This guide walks through reproducing OpenAI's GPT-2 (124M parameters) from scratch. The reproduction achieves a validation loss of ~2.85 on OpenWebText, matching the performance of fine-tuned GPT-2 on the same dataset.
+
+<Note>
+**Hardware Requirements:**
+- 8x A100 40GB GPUs (single node)
+- ~500GB disk space for dataset
+- Training time: ~4 days
+</Note>
+
+## Dataset Preparation
+
+### Step 1: Prepare OpenWebText
+
+OpenWebText is an open reproduction of OpenAI's (private) WebText dataset used to train GPT-2.
+
+```bash
+python data/openwebtext/prepare.py
+```
+
+This script will:
+1. Download the OpenWebText dataset from HuggingFace
+2. Tokenize using GPT-2 BPE tokenizer (via tiktoken)
+3. Create `train.bin` and `val.bin` files with token IDs stored as uint16
+
+<Info>
+The OpenWebText dataset contains ~9B tokens. The preparation script may take several hours depending on your CPU and disk speed.
+</Info>
+
+### Data Format
+
+The prepared dataset consists of:
+- `train.bin` - Training set token IDs (uint16 array)
+- `val.bin` - Validation set token IDs (uint16 array)
+- `meta.pkl` - Metadata including vocab_size (50257 for GPT-2 BPE)
+
+## Model Configuration
+
+The GPT-2 124M architecture uses the following hyperparameters:
+
+```python
+# Model Architecture (train.py:52-56)
+n_layer = 12          # Transformer layers
+n_head = 12           # Attention heads per layer
+n_embd = 768          # Embedding/hidden dimension
+dropout = 0.0         # No dropout for pretraining
+bias = False          # No bias in LayerNorm/Linear
+
+# Context and Batching
+block_size = 1024     # Sequence length
+batch_size = 12       # Per-GPU micro-batch size
+gradient_accumulation_steps = 40  # 5 steps × 8 GPUs
+
+# Effective batch size calculation:
+# 12 batch × 1024 tokens × 40 grad_accum × 8 GPUs = 491,520 tokens/iter
+```
+
+<Warning>
+The effective batch size of ~0.5M tokens is crucial for stable training. Don't reduce it significantly if you want to match the reproduction results.
+</Warning>
+
+## Training Hyperparameters
+
+### Optimizer Configuration
+
+```python
+# AdamW Optimizer (train.py:58-63)
+learning_rate = 6e-4  # Maximum learning rate
+weight_decay = 1e-1   # AdamW weight decay
+beta1 = 0.9           # Adam momentum
+beta2 = 0.95          # Adam second moment
+grad_clip = 1.0       # Gradient clipping norm
+```
+
+### Learning Rate Schedule
+
+```python
+# Cosine Decay with Warmup (train.py:65-68)
+decay_lr = True
+warmup_iters = 2000      # Linear warmup for 2K steps
+max_iters = 600000       # Total training iterations
+lr_decay_iters = 600000  # Decay over full training
+min_lr = 6e-5            # Final LR (~learning_rate/10)
+```
+
+The learning rate schedule (train.py:231-242):
+
+```python
+def get_lr(it):
+    # 1) Linear warmup for warmup_iters steps
+    if it < warmup_iters:
+        return learning_rate * (it + 1) / (warmup_iters + 1)
+    # 2) After lr_decay_iters, return min learning rate
+    if it > lr_decay_iters:
+        return min_lr
+    # 3) In between, use cosine decay down to min learning rate
+    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (learning_rate - min_lr)
+```
+
+## Training Command
+
+Use the pre-configured training script for GPT-2 reproduction:
+
+```bash
+torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+```
+
+### Config File: `config/train_gpt2.py`
+
+```python
+# Training GPT-2 (124M) to loss ~2.85 on 8× A100 40GB
+# Expected time: ~4 days
+
+wandb_log = True
+wandb_project = 'owt'
+wandb_run_name = 'gpt2-124M'
+
+# Total batch size = ~0.5M tokens
+# 12 batch_size × 1024 block_size × 40 grad_accum × 8 GPUs = 491,520
+batch_size = 12
+block_size = 1024
+gradient_accumulation_steps = 40  # 5 × 8 GPUs
+
+# Total tokens: 300B (600K iters × 0.5M tokens)
+max_iters = 600000
+lr_decay_iters = 600000
+
+# Evaluation
+eval_interval = 1000   # Evaluate every 1K iterations
+eval_iters = 200       # Use 200 batches for evaluation
+log_interval = 10      # Log every 10 iterations
+
+# Weight decay
+weight_decay = 1e-1
+```
+
+## Expected Results
+
+### Training Metrics
+
+After ~4 days of training on 8× A100 40GB:
+
+<Steps>
+  <Step title="Initial Phase (0-10K iters)">
+    - Loss drops rapidly from ~10 to ~4
+    - Learning rate warming up linearly
+    - MFU stabilizes around 50-60%
+  </Step>
+  
+  <Step title="Middle Phase (10K-500K iters)">
+    - Steady loss decrease from ~4 to ~3
+    - Cosine LR decay begins
+    - Consistent training speed (~250ms/iter with compile)
+  </Step>
+  
+  <Step title="Final Phase (500K-600K iters)">
+    - Loss converges to ~2.85
+    - Learning rate approaching min_lr
+    - Validation loss plateaus
+  </Step>
+</Steps>
+
+### Final Performance
+
+| Metric | Value |
+|--------|-------|
+| Training Loss | ~2.85 |
+| Validation Loss | ~2.85 |
+| Total Training Time | ~4 days |
+| Tokens Processed | ~300B |
+| Model Parameters | 124M |
+| MFU (A100) | 50-60% |
+
+<Info>
+**Comparison with OpenAI GPT-2:**
+
+OpenAI's GPT-2 124M checkpoint achieves val loss ~3.11 on OpenWebText out-of-the-box. However, when fine-tuned on OpenWebText, it reaches ~2.85, matching our from-scratch training. This is due to a domain gap between WebText (closed) and OpenWebText (open reproduction).
+</Info>
+
+## Training Progress Output
+
+Expect console output like:
+
+```bash
+Overriding config with config/train_gpt2.py:
+# [config file contents displayed]
+
+tokens per iteration will be: 491,520
+compiling the model... (takes a ~minute)
+Initializing a new model from scratch
+found vocab_size = 50257 (inside data/openwebtext/meta.pkl)
+num decayed parameter tensors: 50, with 123,587,328 parameters
+num non-decayed parameter tensors: 98, with 121,344 parameters
+using fused AdamW: True
+
+step 0: train loss 10.9634, val loss 10.9682
+iter 10: loss 9.2341, time 248.32ms, mfu 52.34%
+iter 20: loss 7.8234, time 245.67ms, mfu 53.12%
+...
+step 1000: train loss 3.9123, val loss 3.9287
+saving checkpoint to out
+iter 1010: loss 3.8956, time 243.21ms, mfu 54.87%
+...
+step 600000: train loss 2.8512, val loss 2.8534
+```
+
+## Monitoring Training
+
+### Weights & Biases Integration
+
+Enable W&B logging to track:
+- Training/validation loss curves
+- Learning rate schedule
+- Model FLOPs Utilization (MFU)
+- Hardware metrics
+
+```bash
+# W&B is enabled in config/train_gpt2.py
+wandb_log = True
+wandb_project = 'owt'
+wandb_run_name = 'gpt2-124M'
+```
+
+### Key Metrics to Watch
+
+1. **Validation Loss**: Should steadily decrease to ~2.85
+2. **MFU**: Should be 50-60% on A100s (indicates good hardware utilization)
+3. **Time per Iteration**: ~250ms without compile, ~135ms with PyTorch 2.0 compile
+4. **Train/Val Gap**: Should remain small (no overfitting on large dataset)
+
+<Warning>
+**Red Flags:**
+- MFU below 40%: Check for data loading bottlenecks
+- Loss spikes: May indicate learning rate too high or gradient issues
+- Very slow iterations (>500ms): Ensure torch.compile is enabled and working
+</Warning>
+
+## Checkpointing
+
+Checkpoints are saved to `out_dir` (default: `out/`) and include:
+
+```python
+checkpoint = {
+    'model': raw_model.state_dict(),       # Model weights
+    'optimizer': optimizer.state_dict(),    # Optimizer state
+    'model_args': model_args,               # Architecture config
+    'iter_num': iter_num,                   # Current iteration
+    'best_val_loss': best_val_loss,         # Best validation loss
+    'config': config,                       # Full training config
+}
+```
+
+Checkpoints are saved:
+- Every `eval_interval` iterations (default: 1000)
+- When validation loss improves (or if `always_save_checkpoint=True`)
+
+## Resume Training
+
+To resume from a checkpoint:
+
+```bash
+python train.py config/train_gpt2.py --init_from=resume
+```
+
+This will:
+1. Load model weights from `out/ckpt.pt`
+2. Restore optimizer state (momentum, etc.)
+3. Continue from the saved `iter_num`
+4. Preserve the `best_val_loss` tracking
+
+## Customization
+
+### Adjust for Different Hardware
+
+<Tabs>
+  <Tab title="4 GPUs">
+    ```bash
+    # Adjust gradient accumulation to maintain effective batch size
+    torchrun --standalone --nproc_per_node=4 train.py config/train_gpt2.py \
+        --gradient_accumulation_steps=80  # 5 × 8 × 2 = 80
+    ```
+  </Tab>
+  
+  <Tab title="Single GPU">
+    ```bash
+    # Much slower, but possible
+    python train.py config/train_gpt2.py \
+        --gradient_accumulation_steps=320  # 5 × 8 × 8 = 320
+    ```
+  </Tab>
+  
+  <Tab title="16 GPUs">
+    ```bash
+    # Reduce gradient accumulation proportionally
+    torchrun --standalone --nproc_per_node=16 train.py config/train_gpt2.py \
+        --gradient_accumulation_steps=20  # 5 × 8 / 2 = 20
+    ```
+  </Tab>
+</Tabs>
+
+### Smaller Model for Testing
+
+```bash
+# Train a smaller model for testing the pipeline
+python train.py config/train_gpt2.py \
+    --n_layer=6 --n_head=6 --n_embd=384 \
+    --max_iters=10000 --eval_interval=100
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Distributed Training" icon="network-wired" href="/training/distributed">
+    Scale to multiple nodes for faster training
+  </Card>
+  <Card title="Sampling" icon="wand-magic-sparkles" href="/generation/sampling">
+    Generate text from your trained model
+  </Card>
+</CardGroup>

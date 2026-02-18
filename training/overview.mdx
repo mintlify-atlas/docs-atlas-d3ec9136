@@ -1,256 +1,251 @@
 ---
 title: Training Overview
-description: Understanding nanoGPT's training architecture and core concepts
+description: Understanding nanoGPT's training pipeline and workflow
 ---
 
-# Training Overview
+## Training Pipeline
 
-nanoGPT is designed to make training medium-sized GPT models simple, fast, and transparent. The entire training loop is contained in a ~300-line `train.py` script that's easy to understand and modify.
+The nanoGPT training system is built around a simple, hackable ~300-line training loop in `train.py`. The script is designed to be both easy to understand and efficient enough to reproduce GPT-2 models from scratch.
 
-## Core Architecture
+### Core Architecture
 
-The training system is built around three main components:
+The training pipeline consists of three main components:
 
-<Steps>
-  <Step title="Data Loading">
-    Uses memory-mapped numpy arrays (`train.bin`, `val.bin`) for efficient data access without loading everything into RAM.
-  </Step>
-  
-  <Step title="Model Configuration">
-    GPT models are configured via Python files in the `config/` directory that override default hyperparameters.
-  </Step>
-  
-  <Step title="Training Loop">
-    A straightforward training loop with gradient accumulation, checkpointing, and optional distributed training.
-  </Step>
-</Steps>
-
-## Key Features
-
-### PyTorch 2.0 Compilation
-
-By default, nanoGPT uses `torch.compile()` to optimize the model:
-
-```python
-compile = True  # use PyTorch 2.0 to compile the model to be faster
-```
-
-This typically reduces iteration time by ~40-50% (e.g., from 250ms to 135ms per iteration).
-
-<Note>
-  PyTorch 2.0 compilation is not available on all platforms (e.g., Windows). Disable it with `--compile=False` if needed.
-</Note>
-
-### Mixed Precision Training
-
-nanoGPT automatically selects the best dtype for your hardware:
-
-```python
-dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
-```
-
-- **bfloat16**: Preferred on modern GPUs (A100, H100) for better numerical stability
-- **float16**: Falls back to FP16 with automatic gradient scaling
-- **float32**: Available for CPU or debugging
-
-### Learning Rate Schedule
-
-Uses cosine decay with linear warmup (train.py:231):
-
-1. **Warmup phase**: Linear increase from 0 to `learning_rate` over `warmup_iters` steps
-2. **Cosine decay**: Smooth decay from `learning_rate` to `min_lr` over `lr_decay_iters` steps
-3. **Final phase**: Constant `min_lr` after decay period
-
-## Model Hyperparameters
-
-The default configuration trains GPT-2 (124M parameters) on OpenWebText:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `n_layer` | 12 | Number of transformer layers |
-| `n_head` | 12 | Number of attention heads per layer |
-| `n_embd` | 768 | Embedding dimension |
-| `block_size` | 1024 | Maximum context length (tokens) |
-| `batch_size` | 12 | Micro-batch size per GPU |
-| `gradient_accumulation_steps` | 40 | Accumulate gradients over multiple steps |
-| `dropout` | 0.0 | Dropout rate (0.0 for pretraining, 0.1+ for finetuning) |
-| `bias` | False | Use bias in LayerNorm and Linear layers |
+1. **Model Initialization** - Three modes for starting training
+2. **Training Loop** - Standard gradient descent with optional distributed training
+3. **Checkpointing** - Automatic saving and resuming of training state
 
 <Info>
-  Effective batch size = `batch_size` × `gradient_accumulation_steps` × `num_gpus` × `block_size`
-  
-  Default: 12 × 40 × 1 × 1024 = ~491K tokens per iteration
+The entire training loop in `train.py` is approximately 300 lines of boilerplate code, making it easy to understand and modify for your needs.
 </Info>
-
-## Training Hyperparameters
-
-### Optimizer Settings
-
-```python
-learning_rate = 6e-4      # max learning rate
-weight_decay = 1e-1        # AdamW weight decay
-beta1 = 0.9                # Adam beta1
-beta2 = 0.95               # Adam beta2  
-grad_clip = 1.0            # gradient clipping threshold
-```
-
-### Training Duration
-
-```python
-max_iters = 600000         # total training iterations
-warmup_iters = 2000        # warmup steps
-lr_decay_iters = 600000    # decay over full training
-min_lr = 6e-5              # minimum learning rate (~learning_rate/10)
-```
 
 ## Initialization Modes
 
-nanoGPT supports three initialization modes via the `init_from` parameter:
+nanoGPT supports three different initialization modes via the `init_from` parameter:
 
-<Tabs>
-  <Tab title="scratch">
-    Train a new model from random initialization:
-    
-    ```python
-    init_from = 'scratch'
-    ```
-    
-    The vocab size is automatically detected from `meta.pkl` or defaults to 50304.
-  </Tab>
-  
-  <Tab title="resume">
-    Resume training from a checkpoint:
-    
-    ```python
-    init_from = 'resume'
-    out_dir = 'out'  # directory containing ckpt.pt
-    ```
-    
-    Loads model weights, optimizer state, iteration count, and best validation loss.
-  </Tab>
-  
-  <Tab title="gpt2*">
-    Initialize from pretrained OpenAI GPT-2 weights:
-    
-    ```python
-    init_from = 'gpt2'        # 124M params
-    init_from = 'gpt2-medium' # 350M params
-    init_from = 'gpt2-large'  # 774M params
-    init_from = 'gpt2-xl'     # 1.5B params
-    ```
-    
-    Useful for finetuning on custom datasets.
-  </Tab>
-</Tabs>
+### 1. Training from Scratch (`init_from='scratch'`)
 
-## Checkpointing
-
-Checkpoints are automatically saved to `out_dir` when validation loss improves:
+Initializes a new model with random weights:
 
 ```python
-out_dir = 'out'                    # checkpoint directory
-eval_interval = 2000               # evaluate every N iterations
-eval_iters = 200                   # use N batches for evaluation
-always_save_checkpoint = True      # save even if val loss doesn't improve
+if init_from == 'scratch':
+    print("Initializing a new model from scratch")
+    # Determine vocab size from dataset or use default
+    if meta_vocab_size is None:
+        print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
+    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
+    gptconf = GPTConfig(**model_args)
+    model = GPT(gptconf)
 ```
 
-Each checkpoint contains:
-- Model weights (`model`)
-- Optimizer state (`optimizer`)
-- Model architecture config (`model_args`)
-- Current iteration (`iter_num`)
-- Best validation loss (`best_val_loss`)
-- Full training config (`config`)
+**When to use:** Training a completely new model on your dataset.
 
-## Device Support
+### 2. Resuming Training (`init_from='resume'`)
 
-nanoGPT runs on multiple hardware platforms:
-
-<Tabs>
-  <Tab title="CUDA (GPU)">
-    ```bash
-    python train.py --device=cuda
-    ```
-    
-    Automatically uses bfloat16 if supported, otherwise float16 with gradient scaling.
-  </Tab>
-  
-  <Tab title="Apple Silicon (MPS)">
-    ```bash
-    python train.py --device=mps
-    ```
-    
-    Uses Metal Performance Shaders for 2-3× speedup on M1/M2/M3 Macs.
-  </Tab>
-  
-  <Tab title="CPU">
-    ```bash
-    python train.py --device=cpu --compile=False
-    ```
-    
-    Runs on CPU with torch.compile disabled. Much slower but useful for debugging.
-  </Tab>
-</Tabs>
-
-## Configuration System
-
-Override defaults using command-line arguments or config files:
-
-```bash
-# Command-line overrides
-python train.py --batch_size=32 --learning_rate=1e-3
-
-# Config file (recommended)
-python train.py config/train_shakespeare_char.py
-
-# Mix both (CLI overrides config file)
-python train.py config/train_gpt2.py --max_iters=100000
-```
-
-<Warning>
-  Command-line arguments always take precedence over config files.
-</Warning>
-
-## Monitoring Training
-
-### Console Logging
-
-Training progress is logged to console:
-
-```
-step 2000: train loss 3.1234, val loss 3.2456
-iter 2001: loss 3.1567, time 142.34ms, mfu 45.67%
-```
-
-- **mfu**: Model FLOPs Utilization - percentage of theoretical peak GPU performance
-- **time**: Time per iteration in milliseconds
-
-### Weights & Biases Integration
-
-Optional W&B logging:
+Resumes from a saved checkpoint:
 
 ```python
-wandb_log = True
-wandb_project = 'owt'
-wandb_run_name = 'gpt2-124M'
+elif init_from == 'resume':
+    print(f"Resuming training from {out_dir}")
+    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint_model_args = checkpoint['model_args']
+    # Force these config attributes to be equal
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+        model_args[k] = checkpoint_model_args[k]
+    # Create model and load weights
+    gptconf = GPTConfig(**model_args)
+    model = GPT(gptconf)
+    model.load_state_dict(checkpoint['model'])
+    iter_num = checkpoint['iter_num']
+    best_val_loss = checkpoint['best_val_loss']
 ```
 
-## Next Steps
+**When to use:** Continuing an interrupted training run or extending training.
+
+### 3. Fine-tuning from GPT-2 (`init_from='gpt2*'`)
+
+Loads pretrained OpenAI GPT-2 weights:
+
+```python
+elif init_from.startswith('gpt2'):
+    print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
+    # Available: 'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'
+    override_args = dict(dropout=dropout)
+    model = GPT.from_pretrained(init_from, override_args)
+    # Read config params for checkpoint storage
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+        model_args[k] = getattr(model.config, k)
+```
+
+**When to use:** Fine-tuning on a specific task or dataset.
+
+## Training Loop Structure
+
+The main training loop (train.py:255-333) follows a standard structure:
+
+```python
+while True:
+    # 1. Set learning rate with decay schedule
+    lr = get_lr(iter_num) if decay_lr else learning_rate
+    
+    # 2. Evaluate and checkpoint (every eval_interval)
+    if iter_num % eval_interval == 0 and master_process:
+        losses = estimate_loss()
+        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        if losses['val'] < best_val_loss or always_save_checkpoint:
+            torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+    
+    # 3. Forward-backward pass with gradient accumulation
+    for micro_step in range(gradient_accumulation_steps):
+        with ctx:
+            logits, loss = model(X, Y)
+            loss = loss / gradient_accumulation_steps
+        X, Y = get_batch('train')  # Async prefetch next batch
+        scaler.scale(loss).backward()
+    
+    # 4. Gradient clipping and optimizer step
+    if grad_clip != 0.0:
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+    scaler.step(optimizer)
+    scaler.update()
+    optimizer.zero_grad(set_to_none=True)
+    
+    # 5. Logging and timing
+    if iter_num % log_interval == 0:
+        mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+    
+    iter_num += 1
+    if iter_num > max_iters:
+        break
+```
+
+### Key Features
+
+- **Gradient Accumulation**: Simulate larger batch sizes on limited hardware
+- **Mixed Precision**: Automatic FP16/BF16 training with GradScaler
+- **PyTorch 2.0 Compile**: Significant speedups (~2x faster)
+- **Async Data Loading**: Next batch prefetched during forward pass
+- **Learning Rate Scheduling**: Cosine decay with linear warmup
+
+## Model Configurations
+
+Default hyperparameters (train.py:51-74) are designed for GPT-2 124M reproduction:
+
+```python
+# Model architecture
+n_layer = 12          # Number of transformer layers
+n_head = 12           # Number of attention heads
+n_embd = 768          # Embedding dimension
+dropout = 0.0         # Dropout (0 for pretraining, 0.1+ for finetuning)
+bias = False          # Bias in LayerNorm and Linear layers
+
+# Training
+batch_size = 12       # Micro-batch size per GPU
+block_size = 1024     # Context length
+gradient_accumulation_steps = 40  # Effective batch size multiplier
+max_iters = 600000    # Total training iterations
+
+# Optimization
+learning_rate = 6e-4  # Peak learning rate
+weight_decay = 1e-1   # AdamW weight decay
+beta1 = 0.9           # Adam beta1
+beta2 = 0.95          # Adam beta2
+grad_clip = 1.0       # Gradient clipping norm
+
+# Learning rate schedule
+warmup_iters = 2000   # Linear warmup steps
+lr_decay_iters = 600000  # Cosine decay period
+min_lr = 6e-5         # Minimum LR (~learning_rate/10)
+```
+
+## Data Loading
+
+nanoGPT uses a simple memory-mapped data loader (train.py:114-131):
+
+```python
+data_dir = os.path.join('data', dataset)
+
+def get_batch(split):
+    # Memory-mapped loading prevents memory leaks
+    if split == 'train':
+        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+    else:
+        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+    
+    # Random sampling of sequences
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    
+    # Move to GPU with pinned memory for async transfer
+    if device_type == 'cuda':
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    return x, y
+```
 
 <CardGroup cols={2}>
-  <Card title="Shakespeare Tutorial" icon="book" href="/training/shakespeare">
-    Train your first character-level GPT on Shakespeare
+  <Card title="Training from Scratch" icon="rocket" href="/training/from-scratch">
+    Learn how to reproduce GPT-2 on OpenWebText
   </Card>
-  
-  <Card title="GPT-2 Reproduction" icon="robot" href="/training/gpt2-reproduction">
-    Reproduce OpenAI's GPT-2 results
+  <Card title="Distributed Training" icon="network-wired" href="/training/distributed">
+    Scale training across multiple GPUs and nodes
   </Card>
-  
-  <Card title="Finetuning" icon="sliders" href="/training/finetuning">
-    Finetune pretrained models on custom data
+  <Card title="Configuration System" icon="sliders" href="/training/configuration">
+    Master the Poor Man's Configurator
   </Card>
-  
-  <Card title="Distributed Training" icon="server" href="/training/distributed">
-    Scale training across multiple GPUs
+  <Card title="Evaluation" icon="chart-line" href="/training/evaluation">
+    Monitor training progress and metrics
   </Card>
 </CardGroup>
+
+## Quick Start Examples
+
+<Tabs>
+  <Tab title="Single GPU">
+    ```bash
+    # Basic training run
+    python train.py --batch_size=32 --compile=False
+    
+    # With config file
+    python train.py config/train_shakespeare_char.py
+    ```
+  </Tab>
+  <Tab title="Multi-GPU">
+    ```bash
+    # 8 GPUs on single node
+    torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+    ```
+  </Tab>
+  <Tab title="Resume">
+    ```bash
+    # Resume from checkpoint
+    python train.py --init_from=resume --out_dir=out
+    ```
+  </Tab>
+  <Tab title="Fine-tune">
+    ```bash
+    # Fine-tune GPT-2 XL
+    python train.py config/finetune_shakespeare.py
+    ```
+  </Tab>
+</Tabs>
+
+## Performance Monitoring
+
+The training script tracks several metrics:
+
+- **Loss**: Training and validation loss
+- **MFU (Model FLOPs Utilization)**: Hardware efficiency metric
+- **Tokens/iteration**: Throughput measurement
+- **Time per iteration**: Training speed
+
+<Note>
+For GPT-2 124M reproduction on 8x A100 40GB GPUs, expect:
+- ~4 days total training time
+- Final validation loss: ~2.85
+- ~490K tokens per iteration
+- MFU: ~50-60% on A100s
+</Note>

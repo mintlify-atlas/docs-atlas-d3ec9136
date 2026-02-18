@@ -1,0 +1,439 @@
+---
+title: 'Benchmarking Performance'
+description: 'Measure and optimize training performance with bench.py'
+icon: 'gauge-high'
+---
+
+Understand your model's performance characteristics and identify bottlenecks using nanoGPT's benchmarking tools.
+
+## Why Benchmark?
+
+Benchmarking helps you:
+- Measure training speed (iterations per second)
+- Calculate Model FLOPs Utilization (MFU)
+- Compare different optimization strategies
+- Identify hardware bottlenecks
+- Validate configuration changes
+
+## Quick Start
+
+Run the benchmark script:
+
+```bash
+python bench.py
+```
+
+**Typical output:**
+```
+Compiling model...
+0/10 loss: 10.9768
+1/10 loss: 10.9532
+...
+time per iteration: 135.42ms, MFU: 42.31%
+```
+
+## bench.py vs train.py
+
+`bench.py` is a simplified version of `train.py` focused solely on performance measurement:
+
+<Tabs>
+  <Tab title="bench.py">
+    **Purpose:** Pure performance benchmarking
+    
+    **Characteristics:**
+    - ~120 lines of code
+    - No checkpointing or logging
+    - Fixed model size (GPT-2 124M)
+    - No validation or evaluation
+    - Minimal overhead
+    - Fixed batch size and sequence length
+    
+    **Use when:** Testing hardware, comparing optimizations, profiling
+  </Tab>
+  
+  <Tab title="train.py">
+    **Purpose:** Full training pipeline
+    
+    **Characteristics:**
+    - ~340 lines of code
+    - Checkpointing and resuming
+    - Evaluation on validation set
+    - Logging (console, wandb)
+    - Configurable model sizes
+    - Learning rate scheduling
+    
+    **Use when:** Actual model training
+  </Tab>
+</Tabs>
+
+See the file comparison: [bench.py:1-3](/reference/bench) notes it's "A much shorter version of train.py for benchmarking."
+
+## Configuration Options
+
+### Model Settings
+
+```python bench.py
+batch_size = 12
+block_size = 1024
+bias = False
+real_data = True
+seed = 1337
+```
+
+The benchmark uses a fixed GPT configuration:
+
+```python bench.py
+gptconf = GPTConfig(
+    block_size = 1024,    # context size
+    n_layer = 12,         # 12 layers
+    n_head = 12,          # 12 attention heads
+    n_embd = 768,         # 768 embedding dim
+    dropout = 0,          # no dropout for determinism
+    bias = bias,
+)
+```
+
+This matches GPT-2 124M architecture for consistent comparisons.
+
+### Data Loading
+
+<Tabs>
+  <Tab title="Real Data (default)">
+    Uses actual OpenWebText data:
+    
+    ```python bench.py
+    if real_data:
+        dataset = 'openwebtext'
+        data_dir = os.path.join('data', dataset)
+        train_data = np.memmap(os.path.join(data_dir, 'train.bin'), 
+                              dtype=np.uint16, mode='r')
+        def get_batch(split):
+            data = train_data
+            ix = torch.randint(len(data) - block_size, (batch_size,))
+            x = torch.stack([torch.from_numpy(
+                (data[i:i+block_size]).astype(np.int64)) for i in ix])
+            y = torch.stack([torch.from_numpy(
+                (data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+            return x, y
+    ```
+    
+    **Pros:** Realistic benchmarking with actual data loading overhead
+  </Tab>
+  
+  <Tab title="Synthetic Data">
+    Uses random tensors for pure compute measurement:
+    
+    ```python bench.py
+    else:
+        # Fixed data to not care about data loading
+        x = torch.randint(50304, (batch_size, block_size), device=device)
+        y = torch.randint(50304, (batch_size, block_size), device=device)
+        get_batch = lambda split: (x, y)
+    ```
+    
+    **Pros:** Isolates compute performance, eliminates I/O variability
+  </Tab>
+</Tabs>
+
+<Tip>
+  Set `real_data = False` to isolate pure computational performance without data loading overhead.
+</Tip>
+
+## Benchmarking Modes
+
+### Simple Benchmarking (Default)
+
+Measures wall-clock time and MFU:
+
+```python bench.py
+if not profile:
+    torch.cuda.synchronize()
+    for stage, num_steps in enumerate([10, 20]):  # burnin, then benchmark
+        t0 = time.time()
+        X, Y = get_batch('train')
+        for k in range(num_steps):
+            with ctx:
+                logits, loss = model(X, Y)
+            X, Y = get_batch('train')
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+        torch.cuda.synchronize()
+        t1 = time.time()
+        dt = t1-t0
+        mfu = model.estimate_mfu(batch_size * 1 * num_steps, dt)
+        if stage == 1:
+            print(f"time per iteration: {dt/num_steps*1000:.4f}ms, MFU: {mfu*100:.2f}%")
+```
+
+**Two stages:**
+1. **Burn-in (10 steps):** Warm up GPU, compile kernels, ignored for measurements
+2. **Benchmark (20 steps):** Actual timing measurement
+
+### PyTorch Profiler Mode
+
+Detailed profiling with TensorBoard visualization:
+
+```bash
+python bench.py --profile=True
+```
+
+```python bench.py
+if profile:
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, 
+                   torch.profiler.ProfilerActivity.CUDA],
+        schedule=torch.profiler.schedule(
+            wait=5, warmup=5, active=5, repeat=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler('./bench_log'),
+        with_flops=True,
+    ) as prof:
+        for k in range(num_steps):
+            with ctx:
+                logits, loss = model(X, Y)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            prof.step()
+```
+
+**View results:**
+```bash
+tensorboard --logdir=./bench_log
+```
+
+<Note>
+  Profiling adds significant overhead. Use only for detailed analysis, not for absolute performance numbers.
+</Note>
+
+## Understanding MFU
+
+Model FLOPs Utilization (MFU) measures how efficiently you're using your GPU's theoretical peak performance.
+
+### What is MFU?
+
+```python model.py
+def estimate_mfu(self, fwdbwd_per_iter, dt):
+    """estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS"""
+    # Estimate FLOPs per iteration
+    N = self.get_num_params()
+    cfg = self.config
+    L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
+    flops_per_token = 6*N + 12*L*H*Q*T
+    flops_per_fwdbwd = flops_per_token * T
+    flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+    
+    # Compare to A100 peak
+    flops_achieved = flops_per_iter * (1.0/dt)  # per second
+    flops_promised = 312e12  # A100 GPU bfloat16 peak: 312 TFLOPS
+    mfu = flops_achieved / flops_promised
+    return mfu
+```
+
+**Interpretation:**
+- **40-50% MFU**: Excellent (typical for well-optimized transformers)
+- **30-40% MFU**: Good
+- **20-30% MFU**: Acceptable
+- **Below 20% MFU**: Room for optimization
+
+<Warning>
+  MFU is calculated for A100 GPUs (312 TFLOPS bfloat16). For other GPUs, the percentage is relative to A100, not your actual hardware.
+</Warning>
+
+### MFU Formula
+
+Based on the PaLM paper (Appendix B):
+
+```
+FLOPs per token = 6N + 12LHQ*T
+
+Where:
+- N = number of parameters
+- L = number of layers
+- H = number of heads
+- Q = head dimension (n_embd / n_head)
+- T = sequence length (block_size)
+```
+
+For GPT-2 124M (12 layers, 12 heads, 768 dim, 1024 seq):
+- Parameters: 124M
+- FLOPs per token: ~768M
+- FLOPs per iteration (batch=12): ~9.4T
+
+## Performance Impact of PyTorch 2.0
+
+The README documents real performance improvements from `torch.compile()`:
+
+> "The improvement from the one line of code is noticeable, e.g. cutting down iteration time from ~250ms / iter to 135ms / iter."
+
+See [README:209](/reference/readme#efficiency-notes)
+
+### Measuring Compile Impact
+
+<Steps>
+  <Step title="Baseline (no compile)">
+    ```bash
+    python bench.py --compile=False
+    ```
+    
+    Expected: ~250ms per iteration
+  </Step>
+  
+  <Step title="With compilation">
+    ```bash
+    python bench.py --compile=True
+    ```
+    
+    Expected: ~135ms per iteration (**46% faster!**)
+  </Step>
+</Steps>
+
+```python bench.py
+if compile:
+    print("Compiling model...")
+    model = torch.compile(model)  # pytorch 2.0
+```
+
+<Tip>
+  First iteration after compilation is slow (compiling kernels). Always use burn-in phase or ignore the first few iterations.
+</Tip>
+
+## Benchmarking Best Practices
+
+### 1. Consistent Environment
+
+```bash
+# Lock GPU clocks (NVIDIA)
+sudo nvidia-smi -pm 1
+sudo nvidia-smi -lgc 1410,1410
+
+# Disable other GPU processes
+fuser -v /dev/nvidia*
+```
+
+### 2. Multiple Runs
+
+Run benchmarks 3-5 times and average:
+
+```bash
+for i in {1..5}; do
+    python bench.py --compile=True
+done
+```
+
+### 3. Vary Batch Sizes
+
+Find optimal batch size for your GPU:
+
+```bash
+python bench.py --batch_size=8
+python bench.py --batch_size=12
+python bench.py --batch_size=16
+python bench.py --batch_size=24
+```
+
+### 4. Monitor GPU Utilization
+
+In a separate terminal:
+
+```bash
+watch -n 0.5 nvidia-smi
+```
+
+Look for:
+- GPU utilization: Should be 95-100%
+- Memory usage: Should be 80-95% of available
+- Power draw: Should be near TDP
+
+## Common Optimization Experiments
+
+### Experiment 1: Mixed Precision
+
+```bash
+python bench.py --dtype=float32  # Baseline
+python bench.py --dtype=float16  # 2x faster
+python bench.py --dtype=bfloat16 # 2x faster, more stable
+```
+
+### Experiment 2: TF32
+
+TF32 is enabled by default in bench.py:
+
+```python bench.py
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+```
+
+On Ampere GPUs (A100, RTX 30xx), this provides ~8x speedup for matmul operations.
+
+### Experiment 3: Flash Attention
+
+Flash Attention is automatically used in PyTorch 2.0+:
+
+```python model.py
+self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+if not self.flash:
+    print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+```
+
+For GPT-2 124M, Flash Attention provides ~20-30% speedup.
+
+### Experiment 4: Gradient Accumulation
+
+Simulate larger batch sizes:
+
+```bash
+python bench.py --batch_size=12 --gradient_accumulation_steps=1
+python bench.py --batch_size=6 --gradient_accumulation_steps=2  # same effective batch
+```
+
+Note: bench.py doesn't include gradient accumulation by default, but train.py does.
+
+## Interpreting Results
+
+### Example Output
+
+```
+Compiling model...
+num decayed parameter tensors: 50, with 124,354,560 parameters
+num non-decayed parameter tensors: 98, with 121,344 parameters
+0/10 loss: 10.9768
+1/10 loss: 10.9532
+...
+9/10 loss: 10.8234
+0/20 loss: 10.8123
+...
+19/20 loss: 10.7456
+time per iteration: 135.42ms, MFU: 42.31%
+```
+
+**What this tells us:**
+- **135ms/iter**: Fast iteration time (compile + Flash Attention working)
+- **42% MFU**: Good utilization for transformer training
+- **Loss decreasing**: Model is training correctly
+- **~7.4 iter/sec**: Throughput rate
+
+### Performance Targets
+
+| Hardware | Expected Time/Iter | Expected MFU |
+|----------|-------------------|---------------|
+| A100 40GB | 120-150ms | 40-50% |
+| V100 32GB | 180-220ms | 30-40% |
+| RTX 3090 | 160-200ms | 35-45% |
+| RTX 4090 | 100-130ms | 45-55% |
+
+<Note>
+  These are for GPT-2 124M with batch_size=12, block_size=1024, compile=True, dtype=bfloat16.
+</Note>
+
+## Next Steps
+
+- [Optimization Guide](/guides/optimization) - Techniques to improve performance
+- [Training Guide](/guides/training) - Apply optimizations to real training
+- [Distributed Training](/advanced/distributed) - Scale to multiple GPUs
+
+## Related
+
+- [bench.py reference](/reference/bench) - Complete parameter list
+- [model.py estimate_mfu()](/reference/model#estimate-mfu) - MFU calculation details
+- [Troubleshooting](/troubleshooting/performance) - Performance debugging

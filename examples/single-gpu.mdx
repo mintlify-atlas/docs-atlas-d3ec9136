@@ -1,0 +1,389 @@
+---
+title: 'Single GPU Training'
+description: 'Optimize nanoGPT training for a single GPU setup'
+icon: 'microchip'
+---
+
+## Overview
+
+This guide shows you how to train GPT models on a single GPU, including strategies for working with limited compute resources. Whether you have a consumer GPU or a single datacenter GPU, you can still train impressive models with the right configuration.
+
+## Basic Single GPU Training
+
+Training on a single GPU is straightforward - just run the training script without `torchrun`:
+
+```bash
+python train.py config/train_gpt2.py
+```
+
+<Note>
+The training script automatically detects available GPUs and runs on a single GPU by default.
+</Note>
+
+## Memory Constraints
+
+Single GPU training often requires adjusting hyperparameters to fit within GPU memory limits.
+
+### Memory Usage Factors
+
+GPU memory is consumed by:
+
+1. **Model Parameters**: Weights, biases
+2. **Optimizer State**: Momentum, variance (for Adam)
+3. **Gradients**: Same size as parameters
+4. **Activations**: Intermediate computations during forward pass
+5. **Batch Data**: Input tokens and targets
+
+<Warning>
+The largest memory consumer is usually **activations**, which scale with:
+- Batch size
+- Sequence length (context size)
+- Model size
+</Warning>
+
+## Configuration Strategies
+
+<Tabs>
+  <Tab title="Small GPU (8-12GB)">
+    For GPUs like RTX 3060, RTX 3080, or older datacenter GPUs:
+
+    ### Recommended Configuration
+
+    ```bash
+    python train.py config/train_shakespeare_char.py \
+      --batch_size=8 \
+      --block_size=256 \
+      --n_layer=4 \
+      --n_head=4 \
+      --n_embd=256 \
+      --gradient_accumulation_steps=4
+    ```
+
+    ### Key Adjustments
+
+    | Parameter | Standard | Small GPU | Impact |
+    |-----------|----------|-----------|--------|
+    | `batch_size` | 64 | 8 | Reduce memory by 8x |
+    | `block_size` | 1024 | 256 | Smaller context window |
+    | `n_layer` | 6-12 | 4 | Fewer transformer layers |
+    | `n_embd` | 384-768 | 256 | Smaller embeddings |
+    | `gradient_accumulation_steps` | 1 | 4 | Maintain effective batch size |
+
+    <Tip>
+    Use gradient accumulation to maintain a larger effective batch size without increasing memory usage.
+    </Tip>
+  </Tab>
+
+  <Tab title="Medium GPU (16-24GB)">
+    For GPUs like RTX 3090, RTX 4090, or A10:
+
+    ### Recommended Configuration
+
+    ```bash
+    python train.py config/train_gpt2.py \
+      --batch_size=12 \
+      --block_size=1024 \
+      --gradient_accumulation_steps=4
+    ```
+
+    ### Key Points
+
+    - Can train GPT-2 scale models (124M parameters)
+    - Use gradient accumulation for larger effective batch sizes
+    - Training will be slower than multi-GPU but still practical
+
+    ### Estimated Training Time
+
+    For GPT-2 124M on OpenWebText:
+    - **RTX 4090**: ~2 weeks
+    - **RTX 3090**: ~3 weeks
+    - **A10**: ~3-4 weeks
+  </Tab>
+
+  <Tab title="Large GPU (40-80GB)">
+    For GPUs like A100 40GB, A100 80GB, or H100:
+
+    ### Recommended Configuration
+
+    ```bash
+    python train.py config/train_gpt2.py \
+      --batch_size=24 \
+      --block_size=1024 \
+      --gradient_accumulation_steps=2
+    ```
+
+    ### Advantages
+
+    - Can train larger models (350M+ parameters)
+    - Higher batch sizes improve training stability
+    - Faster training due to better GPU utilization
+
+    ### Estimated Training Time
+
+    For GPT-2 124M on OpenWebText:
+    - **A100 40GB**: ~1.5 weeks
+    - **H100**: ~1 week
+  </Tab>
+</Tabs>
+
+## MacBook Training
+
+You can train smaller models on MacBook laptops, including those with Apple Silicon.
+
+### CPU Training
+
+For any MacBook using CPU:
+
+```bash
+python train.py config/train_shakespeare_char.py \
+  --device=cpu \
+  --compile=False \
+  --eval_iters=20 \
+  --log_interval=1 \
+  --block_size=64 \
+  --batch_size=12 \
+  --n_layer=4 \
+  --n_head=4 \
+  --n_embd=128 \
+  --max_iters=2000 \
+  --lr_decay_iters=2000 \
+  --dropout=0.0
+```
+
+**Training time**: ~3 minutes for Shakespeare character-level model  
+**Validation loss**: ~1.88
+
+### Apple Silicon (M1/M2/M3/M4)
+
+MacBooks with Apple Silicon can use Metal Performance Shaders (MPS) for GPU acceleration:
+
+```bash
+python train.py config/train_shakespeare_char.py \
+  --device=mps \
+  --eval_iters=20 \
+  --block_size=128 \
+  --batch_size=24 \
+  --n_layer=6 \
+  --n_head=6 \
+  --n_embd=256 \
+  --max_iters=5000 \
+  --lr_decay_iters=5000
+```
+
+<Tip>
+MPS provides **2-3x speedup** over CPU and allows for larger models and batch sizes.
+</Tip>
+
+### Sample Output
+
+After training on CPU/MacBook (3 minutes):
+
+```text
+GLEORKEN VINGHARD III:
+Whell's the couse, the came light gacks,
+And the for mought you in Aut fries the not high shee
+bot thou the sought bechive in that to doth groan you,
+No relving thee post mose the wear
+```
+
+<Note>
+Not perfect, but it captures the Shakespearean character gestalt in just 3 minutes on a laptop!
+</Note>
+
+## Optimization Techniques
+
+<AccordionGroup>
+  <Accordion title="Gradient Accumulation">
+    Simulate larger batch sizes by accumulating gradients across multiple forward passes:
+
+    ```bash
+    --batch_size=8 --gradient_accumulation_steps=8
+    # Effective batch size = 8 * 8 = 64
+    ```
+
+    **Benefits**:
+    - Maintain training stability with small memory
+    - Same convergence as large batch training
+    - No accuracy loss
+
+    **Tradeoff**: Slower training (more forward passes per update)
+  </Accordion>
+
+  <Accordion title="Reduce Context Length">
+    Decrease `block_size` to reduce activation memory:
+
+    ```bash
+    --block_size=512  # Instead of 1024
+    ```
+
+    **Memory savings**: ~2x for halving context length
+
+    **Tradeoff**: Model sees less context, may affect quality for long-range dependencies
+  </Accordion>
+
+  <Accordion title="Reduce Model Size">
+    Train a smaller model architecture:
+
+    ```bash
+    --n_layer=6    # Instead of 12
+    --n_head=6     # Instead of 12
+    --n_embd=512   # Instead of 768
+    ```
+
+    **Benefits**:
+    - Much lower memory usage
+    - Faster training iterations
+    - Still capable for many tasks
+
+    **Tradeoff**: Lower model capacity and performance ceiling
+  </Accordion>
+
+  <Accordion title="Mixed Precision Training">
+    Use PyTorch's automatic mixed precision (AMP):
+
+    ```python
+    # In train.py, enable mixed precision
+    scaler = torch.cuda.amp.GradScaler()
+    ```
+
+    **Benefits**:
+    - ~2x memory reduction
+    - ~2x training speedup
+    - Minimal accuracy impact
+
+    **Note**: Requires GPU with Tensor Cores (V100+, RTX 20xx+)
+  </Accordion>
+
+  <Accordion title="Compile with PyTorch 2.0">
+    Enable `torch.compile()` for faster training:
+
+    ```bash
+    --compile=True  # Default in nanoGPT
+    ```
+
+    **Speedup**: ~1.5-2x iteration time reduction
+
+    **Requirements**: PyTorch 2.0+ and compatible CUDA version
+  </Accordion>
+</AccordionGroup>
+
+## Example Configurations
+
+<CodeGroup>
+```bash RTX 3080 (10GB)
+python train.py config/train_shakespeare_char.py \
+  --batch_size=16 \
+  --block_size=256 \
+  --n_layer=6 \
+  --n_head=6 \
+  --n_embd=384 \
+  --gradient_accumulation_steps=4 \
+  --compile=True
+```
+
+```bash RTX 4090 (24GB)
+python train.py config/train_gpt2.py \
+  --batch_size=16 \
+  --block_size=1024 \
+  --gradient_accumulation_steps=3 \
+  --compile=True
+```
+
+```bash A100 (40GB)
+python train.py config/train_gpt2.py \
+  --batch_size=24 \
+  --block_size=1024 \
+  --gradient_accumulation_steps=2 \
+  --compile=True
+```
+
+```bash MacBook Pro M3
+python train.py config/train_shakespeare_char.py \
+  --device=mps \
+  --batch_size=32 \
+  --block_size=128 \
+  --n_layer=6 \
+  --n_head=6 \
+  --n_embd=256
+```
+</CodeGroup>
+
+## Monitoring GPU Usage
+
+Keep an eye on GPU utilization and memory:
+
+```bash
+# Watch GPU usage in real-time
+watch -n 1 nvidia-smi
+
+# Or use nvtop for a nicer interface
+nvtop
+```
+
+<Tip>
+Aim for **>90% GPU utilization** and **~95% memory usage** for optimal training efficiency.
+</Tip>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="CUDA Out of Memory">
+    Error: `RuntimeError: CUDA out of memory`
+
+    **Solutions**:
+    1. Reduce `batch_size` (try half)
+    2. Reduce `block_size` (e.g., 512 instead of 1024)
+    3. Reduce model size (`n_layer`, `n_embd`)
+    4. Increase `gradient_accumulation_steps`
+    5. Enable mixed precision training
+  </Accordion>
+
+  <Accordion title="Training is too slow">
+    **Check**:
+    - `--compile=True` is set (requires PyTorch 2.0+)
+    - GPU utilization is high (`nvidia-smi`)
+    - No CPU bottlenecks (data loading)
+    - Not using `--device=cpu` accidentally
+
+    **Optimizations**:
+    - Enable `torch.compile()`
+    - Increase `batch_size` if memory allows
+    - Use mixed precision (fp16/bf16)
+    - Profile with PyTorch profiler to find bottlenecks
+  </Accordion>
+
+  <Accordion title="MPS device not working (MacBook)">
+    **Requirements**:
+    - macOS 12.3+
+    - PyTorch 1.12+
+    - Apple Silicon (M1/M2/M3/M4)
+
+    **Verify**:
+    ```python
+    import torch
+    print(torch.backends.mps.is_available())  # Should be True
+    ```
+
+    If False, update PyTorch:
+    ```bash
+    pip install --upgrade torch
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Multi-Node Training" icon="network-wired" href="/examples/multi-node">
+    Scale up to multiple GPUs and nodes
+  </Card>
+  <Card title="Configuration Guide" icon="sliders" href="/training/configuration">
+    Deep dive into all training parameters
+  </Card>
+  <Card title="Shakespeare Example" icon="masks-theater" href="/examples/shakespeare">
+    Quick start with character-level Shakespeare
+  </Card>
+  <Card title="GPT-2 Reproduction" icon="clone" href="/examples/gpt2-reproduction">
+    Reproduce full GPT-2 results
+  </Card>
+</CardGroup>

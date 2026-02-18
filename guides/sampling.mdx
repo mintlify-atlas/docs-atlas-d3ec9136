@@ -1,0 +1,431 @@
+---
+title: 'Sampling and Inference'
+description: 'Generate text from trained models using sample.py'
+icon: 'wand-magic-sparkles'
+---
+
+Once you've trained a model, use `sample.py` to generate text. This guide covers all sampling options, from simple text generation to advanced prompting techniques.
+
+## Quick Start
+
+Generate text from a trained Shakespeare model:
+
+```bash
+python sample.py --out_dir=out-shakespeare-char
+```
+
+Sample from pretrained GPT-2 models:
+
+```bash
+python sample.py --init_from=gpt2-xl
+```
+
+## Sample.py Overview
+
+The `sample.py` script is designed for inference and text generation. It supports:
+
+- Loading from your trained checkpoints
+- Using pretrained GPT-2 models (gpt2, gpt2-medium, gpt2-large, gpt2-xl)
+- Custom prompts and prompt files
+- Temperature and top-k sampling control
+- Multiple sample generation
+
+## Command-Line Options
+
+### Model Loading
+
+<Tabs>
+  <Tab title="From Checkpoint">
+    Resume from a model you trained:
+    
+    ```bash
+    python sample.py \
+        --init_from=resume \
+        --out_dir=out-shakespeare-char
+    ```
+    
+    This loads `ckpt.pt` from the specified output directory.
+    
+    **How it works:**
+    ```python sample.py
+    if init_from == 'resume':
+        ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+        checkpoint = torch.load(ckpt_path, map_location=device)
+        gptconf = GPTConfig(**checkpoint['model_args'])
+        model = GPT(gptconf)
+        model.load_state_dict(checkpoint['model'])
+    ```
+  </Tab>
+  
+  <Tab title="From Pretrained GPT-2">
+    Use OpenAI's pretrained GPT-2 models:
+    
+    ```bash
+    python sample.py --init_from=gpt2-xl
+    ```
+    
+    **Available models:**
+    - `gpt2` - 124M parameters
+    - `gpt2-medium` - 350M parameters
+    - `gpt2-large` - 774M parameters
+    - `gpt2-xl` - 1.5B parameters
+    
+    **Implementation:**
+    ```python sample.py
+    elif init_from.startswith('gpt2'):
+        model = GPT.from_pretrained(init_from, dict(dropout=0.0))
+    ```
+  </Tab>
+</Tabs>
+
+### Generation Parameters
+
+#### `--start` - Starting Prompt
+
+Control what text the model continues:
+
+```bash
+# Simple text prompt
+python sample.py --start="To be or not to be"
+
+# Default: newline character
+python sample.py --start="\n"
+
+# GPT-2 special token
+python sample.py --start="<|endoftext|>"
+```
+
+<Tip>
+  The prompt is tokenized using the same method as training (character-level or BPE), so make sure it matches your model's tokenization.
+</Tip>
+
+#### `--num_samples` - Number of Samples
+
+Generate multiple independent completions:
+
+```bash
+python sample.py --num_samples=5
+```
+
+**Default:** `10`
+
+```python sample.py
+with torch.no_grad():
+    with ctx:
+        for k in range(num_samples):
+            y = model.generate(x, max_new_tokens, 
+                             temperature=temperature, top_k=top_k)
+            print(decode(y[0].tolist()))
+            print('---------------')
+```
+
+#### `--max_new_tokens` - Generation Length
+
+Control how many tokens to generate:
+
+```bash
+python sample.py --max_new_tokens=100
+```
+
+**Default:** `500`
+
+<Note>
+  Each token is approximately 4 characters for English text with BPE, or 1 character with character-level tokenization.
+</Note>
+
+#### `--temperature` - Randomness Control
+
+Adjust sampling randomness:
+
+```bash
+# More focused and deterministic
+python sample.py --temperature=0.5
+
+# Default: balanced
+python sample.py --temperature=0.8
+
+# More random and creative
+python sample.py --temperature=1.2
+```
+
+**Default:** `0.8`
+
+**How temperature works:**
+- `< 1.0` - More conservative, higher probability tokens favored
+- `= 1.0` - No change to probability distribution
+- `> 1.0` - More random, flatter probability distribution
+
+See the generation implementation in [model.py:318](/reference/model#generate):
+
+```python model.py
+logits = logits[:, -1, :] / temperature
+```
+
+#### `--top_k` - Top-K Sampling
+
+Limit sampling to the top K most likely tokens:
+
+```bash
+# More focused (only top 50 choices)
+python sample.py --top_k=50
+
+# Default: reasonable diversity
+python sample.py --top_k=200
+
+# No filtering (full vocabulary)
+python sample.py --top_k=0
+```
+
+**Default:** `200`
+
+**Implementation:**
+```python model.py
+if top_k is not None:
+    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+    logits[logits < v[:, [-1]]] = -float('Inf')
+probs = F.softmax(logits, dim=-1)
+idx_next = torch.multinomial(probs, num_samples=1)
+```
+
+### Device and Performance
+
+#### `--device` - Compute Device
+
+```bash
+# CUDA GPU (default if available)
+python sample.py --device=cuda
+
+# Specific GPU
+python sample.py --device=cuda:1
+
+# CPU
+python sample.py --device=cpu
+
+# Apple Silicon
+python sample.py --device=mps
+```
+
+**Default:** `cuda`
+
+#### `--dtype` - Precision
+
+```bash
+# bfloat16 (recommended for A100/H100)
+python sample.py --dtype=bfloat16
+
+# float16 (good for most GPUs)
+python sample.py --dtype=float16
+
+# float32 (slower but more precise)
+python sample.py --dtype=float32
+```
+
+**Default:** Automatically selects `bfloat16` if supported, otherwise `float16`
+
+```python sample.py
+dtype = 'bfloat16' if torch.cuda.is_available() and \
+        torch.cuda.is_bf16_supported() else 'float16'
+```
+
+#### `--compile` - PyTorch 2.0 Compilation
+
+```bash
+python sample.py --compile=True
+```
+
+**Default:** `False`
+
+Enables `torch.compile()` for faster inference (requires PyTorch 2.0+).
+
+## Advanced Prompting
+
+### Prompting from Files
+
+Use the `FILE:` prefix to load prompts from a text file:
+
+```bash
+python sample.py --start=FILE:prompt.txt
+```
+
+Create `prompt.txt`:
+```text
+Once upon a time in a land far away
+```
+
+**How it works:**
+```python sample.py
+if start.startswith('FILE:'):
+    with open(start[5:], 'r', encoding='utf-8') as f:
+        start = f.read()
+start_ids = encode(start)
+```
+
+<Tip>
+  File prompting is useful for:
+  - Long prompts
+  - Batch testing with different prompts
+  - Reproducible experiments
+</Tip>
+
+### Encoding and Decoding
+
+The script automatically detects the tokenization method:
+
+<Tabs>
+  <Tab title="Character-Level (with meta.pkl)">
+    ```python sample.py
+    if init_from == 'resume' and os.path.exists(meta_path):
+        with open(meta_path, 'rb') as f:
+            meta = pickle.load(f)
+        stoi, itos = meta['stoi'], meta['itos']
+        encode = lambda s: [stoi[c] for c in s]
+        decode = lambda l: ''.join([itos[i] for i in l])
+    ```
+    
+    Uses the custom character mapping from your dataset.
+  </Tab>
+  
+  <Tab title="BPE (GPT-2 tokens)">
+    ```python sample.py
+    else:
+        print("No meta.pkl found, assuming GPT-2 encodings...")
+        enc = tiktoken.get_encoding("gpt2")
+        encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
+        decode = lambda l: enc.decode(l)
+    ```
+    
+    Falls back to GPT-2 BPE tokenization.
+  </Tab>
+</Tabs>
+
+## Real-World Examples
+
+### Example 1: Shakespeare Generation
+
+```bash
+python sample.py \
+    --init_from=resume \
+    --out_dir=out-shakespeare-char \
+    --start="ROMEO:" \
+    --num_samples=3 \
+    --max_new_tokens=200 \
+    --temperature=0.8 \
+    --top_k=200
+```
+
+**Sample output:**
+```
+ROMEO:
+O, I am fortune's fool!
+But soft, what light through yonder window breaks?
+It is the east, and Juliet is the sun.
+---------------
+```
+
+### Example 2: Story Continuation
+
+```bash
+python sample.py \
+    --init_from=gpt2-xl \
+    --start="The secret to happiness is" \
+    --num_samples=5 \
+    --max_new_tokens=100 \
+    --temperature=0.7 \
+    --top_k=50
+```
+
+### Example 3: Code Generation
+
+```bash
+python sample.py \
+    --init_from=resume \
+    --out_dir=out-code \
+    --start="def fibonacci(n):\n    " \
+    --num_samples=1 \
+    --max_new_tokens=150 \
+    --temperature=0.5 \
+    --top_k=40
+```
+
+### Example 4: Creative Writing
+
+```bash
+python sample.py \
+    --init_from=gpt2-large \
+    --start=FILE:story_prompt.txt \
+    --num_samples=10 \
+    --max_new_tokens=500 \
+    --temperature=1.0 \
+    --top_k=200 \
+    --seed=42
+```
+
+## Configuration File
+
+You can also create a config file for repeated sampling:
+
+```python config/sample_shakespeare.py
+# Model loading
+init_from = 'resume'
+out_dir = 'out-shakespeare-char'
+
+# Generation settings
+start = "\n"
+num_samples = 10
+max_new_tokens = 500
+temperature = 0.8
+top_k = 200
+
+# Performance
+device = 'cuda'
+compile = False
+```
+
+Run with:
+```bash
+python sample.py config/sample_shakespeare.py
+```
+
+## Troubleshooting
+
+<Warning>
+  **"No meta.pkl found"**: If you see this message but trained a character-level model, make sure your `prepare.py` script created the `meta.pkl` file in your dataset directory.
+</Warning>
+
+<Warning>
+  **Out of memory**: Reduce `max_new_tokens` or use a smaller model variant. Generation uses less memory than training but can still be demanding for very long sequences.
+</Warning>
+
+<Warning>
+  **Slow generation on CPU**: This is expected. Consider using `--device=mps` on Apple Silicon or `--device=cuda` on NVIDIA GPUs for 10-100x speedup.
+</Warning>
+
+## Performance Tips
+
+<Tip>
+  Enable compilation for faster generation:
+  ```bash
+  python sample.py --compile=True
+  ```
+  First run will be slow (compilation), but subsequent generations are faster.
+</Tip>
+
+<Tip>
+  For batch generation of many samples, increase `--num_samples` rather than running the script multiple times. This reuses the loaded model.
+</Tip>
+
+<Tip>
+  Use mixed precision (`--dtype=bfloat16` or `--dtype=float16`) for 2x faster generation with minimal quality loss.
+</Tip>
+
+## Next Steps
+
+- [Benchmarking](/guides/benchmarking) - Measure generation performance
+- [Optimization](/guides/optimization) - Speed up inference
+- [Fine-tuning](/guides/finetuning) - Adapt models to new domains
+
+## Related
+
+- [model.py generate()](/reference/model#generate) - Generation implementation
+- [Configuration](/reference/configuration) - All sampling parameters
+- [Troubleshooting](/troubleshooting/common-issues) - Common sampling issues

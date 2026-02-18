@@ -1,0 +1,407 @@
+---
+title: 'model.py'
+description: 'GPT model implementation with configuration and utility methods'
+icon: 'cube'
+---
+
+## Overview
+
+The `model.py` module contains a complete GPT Language Model implementation in a single file (~300 lines). It provides the core transformer architecture with multi-head causal self-attention, following the GPT-2 design.
+
+**Key Features:**
+- Full GPT model implementation with configurable architecture
+- Ability to load pretrained GPT-2 weights from OpenAI/HuggingFace
+- Flash Attention support (PyTorch >= 2.0)
+- Weight tying between token embeddings and output layer
+- Optimized AdamW optimizer configuration
+- Text generation with temperature and top-k sampling
+
+**Source:** `model.py` (331 lines)
+
+## Classes
+
+### GPTConfig
+
+Dataclass for GPT model configuration parameters.
+
+```python
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True
+```
+
+<ParamField path="block_size" type="int" default="1024">
+  Maximum sequence length (context window)
+</ParamField>
+
+<ParamField path="vocab_size" type="int" default="50304">
+  Vocabulary size. Default is GPT-2's 50257 padded to nearest multiple of 64 for efficiency
+</ParamField>
+
+<ParamField path="n_layer" type="int" default="12">
+  Number of transformer layers
+</ParamField>
+
+<ParamField path="n_head" type="int" default="12">
+  Number of attention heads per layer
+</ParamField>
+
+<ParamField path="n_embd" type="int" default="768">
+  Embedding dimension size
+</ParamField>
+
+<ParamField path="dropout" type="float" default="0.0">
+  Dropout rate. Use 0.0 for pretraining, 0.1+ for finetuning
+</ParamField>
+
+<ParamField path="bias" type="bool" default="True">
+  Whether to use bias in Linear and LayerNorm layers. False is slightly better and faster
+</ParamField>
+
+### GPT
+
+Main GPT model class implementing the transformer architecture.
+
+```python
+class GPT(nn.Module):
+    def __init__(self, config: GPTConfig)
+```
+
+#### Architecture
+
+The model consists of:
+- **Token embeddings** (`wte`): Maps vocabulary indices to embedding vectors
+- **Position embeddings** (`wpe`): Learned position encodings
+- **Transformer blocks** (`h`): Stack of transformer layers with:
+  - Multi-head causal self-attention
+  - Feed-forward MLP (4x expansion)
+  - Layer normalization
+  - Residual connections
+- **Language model head** (`lm_head`): Projects to vocabulary logits
+
+#### Methods
+
+### forward()
+
+Forward pass through the model.
+
+```python
+def forward(self, idx: torch.Tensor, targets: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor | None]
+```
+
+<ParamField path="idx" type="torch.Tensor">
+  Input token indices of shape `(batch_size, sequence_length)`
+</ParamField>
+
+<ParamField path="targets" type="torch.Tensor" default="None">
+  Target token indices for loss computation. If provided, computes cross-entropy loss
+</ParamField>
+
+<ResponseField name="logits" type="torch.Tensor">
+  Output logits. Shape `(batch_size, sequence_length, vocab_size)` during training, or `(batch_size, 1, vocab_size)` during inference (only last position)
+</ResponseField>
+
+<ResponseField name="loss" type="torch.Tensor | None">
+  Cross-entropy loss if targets provided, otherwise None
+</ResponseField>
+
+**Example:**
+```python
+from model import GPT, GPTConfig
+
+config = GPTConfig()
+model = GPT(config)
+
+# Training
+logits, loss = model(input_ids, targets=target_ids)
+
+# Inference
+logits, _ = model(input_ids)
+```
+
+---
+
+### from_pretrained()
+
+Load pretrained GPT-2 weights from HuggingFace.
+
+```python
+@classmethod
+def from_pretrained(cls, model_type: str, override_args: dict = None) -> GPT
+```
+
+<ParamField path="model_type" type="str" required>
+  One of: `'gpt2'` (124M), `'gpt2-medium'` (350M), `'gpt2-large'` (774M), `'gpt2-xl'` (1558M)
+</ParamField>
+
+<ParamField path="override_args" type="dict" default="None">
+  Dictionary with optional `'dropout'` override. Other parameters are determined by model_type
+</ParamField>
+
+<ResponseField name="model" type="GPT">
+  GPT model instance with loaded pretrained weights
+</ResponseField>
+
+**Example:**
+```python
+# Load GPT-2 124M
+model = GPT.from_pretrained('gpt2')
+
+# Load GPT-2 XL with custom dropout
+model = GPT.from_pretrained('gpt2-xl', {'dropout': 0.1})
+```
+
+<Note>
+  The pretrained models always use `vocab_size=50257`, `block_size=1024`, and `bias=True` to match OpenAI's checkpoints.
+</Note>
+
+---
+
+### generate()
+
+Generate text autoregressively from a prompt.
+
+```python
+@torch.no_grad()
+def generate(
+    self,
+    idx: torch.Tensor,
+    max_new_tokens: int,
+    temperature: float = 1.0,
+    top_k: int | None = None
+) -> torch.Tensor
+```
+
+<ParamField path="idx" type="torch.Tensor" required>
+  Conditioning sequence of token indices, shape `(batch_size, sequence_length)`
+</ParamField>
+
+<ParamField path="max_new_tokens" type="int" required>
+  Number of tokens to generate
+</ParamField>
+
+<ParamField path="temperature" type="float" default="1.0">
+  Sampling temperature. Lower values (< 1.0) make output more deterministic, higher values (> 1.0) more random
+</ParamField>
+
+<ParamField path="top_k" type="int | None" default="None">
+  If set, only sample from the top k most likely tokens. Improves quality by filtering unlikely tokens
+</ParamField>
+
+<ResponseField name="output" type="torch.Tensor">
+  Generated sequence including the original prompt, shape `(batch_size, sequence_length + max_new_tokens)`
+</ResponseField>
+
+**Example:**
+```python
+import torch
+from model import GPT
+
+model = GPT.from_pretrained('gpt2')
+model.eval()
+
+# Prepare prompt (example with encoded tokens)
+prompt = torch.tensor([[1, 2, 3]], dtype=torch.long)
+
+# Generate with default temperature
+output = model.generate(prompt, max_new_tokens=100)
+
+# Generate with lower temperature and top-k sampling
+output = model.generate(
+    prompt,
+    max_new_tokens=100,
+    temperature=0.8,
+    top_k=200
+)
+```
+
+<Note>
+  Make sure to call `model.eval()` before generation for best results. The method automatically crops the context if it exceeds `block_size`.
+</Note>
+
+---
+
+### configure_optimizers()
+
+Create an optimized AdamW optimizer with weight decay configuration.
+
+```python
+def configure_optimizers(
+    self,
+    weight_decay: float,
+    learning_rate: float,
+    betas: tuple[float, float],
+    device_type: str
+) -> torch.optim.AdamW
+```
+
+<ParamField path="weight_decay" type="float" required>
+  Weight decay coefficient for regularization
+</ParamField>
+
+<ParamField path="learning_rate" type="float" required>
+  Learning rate for AdamW optimizer
+</ParamField>
+
+<ParamField path="betas" type="tuple[float, float]" required>
+  Beta coefficients for AdamW (typically `(0.9, 0.95)`)
+</ParamField>
+
+<ParamField path="device_type" type="str" required>
+  Device type (`'cuda'` or `'cpu'`). Used to enable fused AdamW on CUDA
+</ParamField>
+
+<ResponseField name="optimizer" type="torch.optim.AdamW">
+  Configured AdamW optimizer with separate parameter groups for weight decay
+</ResponseField>
+
+**Behavior:**
+- 2D parameters (weights in matmuls + embeddings) receive weight decay
+- 1D parameters (biases and layer norms) do not receive weight decay
+- Automatically uses fused AdamW kernel on CUDA for better performance
+
+**Example:**
+```python
+model = GPT(GPTConfig())
+optimizer = model.configure_optimizers(
+    weight_decay=0.1,
+    learning_rate=6e-4,
+    betas=(0.9, 0.95),
+    device_type='cuda'
+)
+```
+
+---
+
+### estimate_mfu()
+
+Estimate Model FLOPs Utilization (MFU) as a percentage of A100 peak performance.
+
+```python
+def estimate_mfu(self, fwdbwd_per_iter: int, dt: float) -> float
+```
+
+<ParamField path="fwdbwd_per_iter" type="int" required>
+  Number of forward-backward passes per iteration (e.g., batch_size * gradient_accumulation_steps)
+</ParamField>
+
+<ParamField path="dt" type="float" required>
+  Time elapsed for the iteration in seconds
+</ParamField>
+
+<ResponseField name="mfu" type="float">
+  Model FLOPs Utilization as a fraction (0.0 to 1.0) of A100 bfloat16 peak FLOPS (312 TFLOPS)
+</ResponseField>
+
+**Example:**
+```python
+import time
+
+model = GPT(GPTConfig())
+t0 = time.time()
+# ... run training iteration ...
+dt = time.time() - t0
+
+mfu = model.estimate_mfu(
+    fwdbwd_per_iter=batch_size * gradient_accumulation_steps,
+    dt=dt
+)
+print(f"MFU: {mfu*100:.2f}%")
+```
+
+<Note>
+  The MFU calculation follows the PaLM paper (Appendix B) and assumes A100 GPU. Higher MFU indicates better hardware utilization.
+</Note>
+
+---
+
+### crop_block_size()
+
+Reduce the model's context length via model surgery.
+
+```python
+def crop_block_size(self, block_size: int)
+```
+
+<ParamField path="block_size" type="int" required>
+  New block size (must be less than or equal to current block_size)
+</ParamField>
+
+**Example:**
+```python
+# Load GPT-2 with block_size=1024
+model = GPT.from_pretrained('gpt2')
+
+# Reduce to 512 for faster training
+model.crop_block_size(512)
+```
+
+---
+
+### get_num_params()
+
+Count the number of parameters in the model.
+
+```python
+def get_num_params(self, non_embedding: bool = True) -> int
+```
+
+<ParamField path="non_embedding" type="bool" default="True">
+  If True, excludes position embeddings from count (they're not used in final layer)
+</ParamField>
+
+<ResponseField name="num_params" type="int">
+  Total number of parameters
+</ResponseField>
+
+## Internal Architecture
+
+### CausalSelfAttention
+
+Multi-head causal self-attention with optional Flash Attention.
+
+- Uses Flash Attention CUDA kernels if PyTorch >= 2.0
+- Falls back to manual attention implementation otherwise
+- Causal masking ensures autoregressive generation
+
+### MLP
+
+Position-wise feed-forward network.
+
+- Projects to 4x the embedding dimension
+- Uses GELU activation
+- Projects back to embedding dimension
+
+### Block
+
+Single transformer block combining attention and MLP.
+
+- Pre-normalization (LayerNorm before attention/MLP)
+- Residual connections
+
+### LayerNorm
+
+Custom LayerNorm with optional bias parameter.
+
+## Model Sizes
+
+Pretrained GPT-2 configurations:
+
+| Model | Params | n_layer | n_head | n_embd |
+|-------|--------|---------|--------|--------|
+| gpt2 | 124M | 12 | 12 | 768 |
+| gpt2-medium | 350M | 24 | 16 | 1024 |
+| gpt2-large | 774M | 36 | 20 | 1280 |
+| gpt2-xl | 1558M | 48 | 25 | 1600 |
+
+## References
+
+1. [OpenAI GPT-2 TensorFlow implementation](https://github.com/openai/gpt-2/blob/master/src/model.py)
+2. [HuggingFace Transformers PyTorch implementation](https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py)
+3. [PaLM paper (for MFU calculation)](https://arxiv.org/abs/2204.02311)

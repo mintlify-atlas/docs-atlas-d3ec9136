@@ -1,0 +1,270 @@
+---
+title: 'Reproducing GPT-2'
+description: 'Complete guide to reproducing GPT-2 124M results on OpenWebText'
+icon: 'clone'
+---
+
+## Overview
+
+This guide walks you through reproducing GPT-2 (124M parameters) training results on OpenWebText, an open reproduction of OpenAI's WebText dataset. This is a serious deep learning workflow that requires significant compute resources.
+
+<Warning>
+This reproduction requires:
+- **8x A100 40GB GPUs** (or equivalent)
+- **~4 days of training time**
+- **~600GB of disk space** for the OpenWebText dataset
+</Warning>
+
+## Prerequisites
+
+Ensure you have all dependencies installed:
+
+```bash
+pip install torch numpy transformers datasets tiktoken wandb tqdm
+```
+
+## Training Workflow
+
+<Steps>
+  <Step title="Prepare OpenWebText Dataset">
+    First, download and tokenize the OpenWebText dataset using GPT-2's BPE tokenizer:
+
+    ```bash
+    python data/openwebtext/prepare.py
+    ```
+
+    This script:
+    - Downloads the [OpenWebText dataset](https://huggingface.co/datasets/openwebtext) from HuggingFace
+    - Tokenizes all text using GPT-2 BPE tokenizer (from tiktoken)
+    - Creates `train.bin` and `val.bin` with uint16 token IDs
+    - Takes several hours and requires ~600GB disk space
+
+    <Note>
+    The binary files store raw token IDs as uint16 bytes for efficient training.
+    </Note>
+  </Step>
+
+  <Step title="Configure Training">
+    The `config/train_gpt2.py` file contains the optimal hyperparameters for reproducing GPT-2 124M:
+
+    ```python config/train_gpt2.py
+    # config for training GPT-2 (124M) down to very nice loss of ~2.85
+    # on 1 node of 8X A100 40GB
+    # launch as: torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+
+    wandb_log = True
+    wandb_project = 'owt'
+    wandb_run_name = 'gpt2-124M'
+
+    # these make the total batch size be ~0.5M
+    # 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
+    batch_size = 12
+    block_size = 1024
+    gradient_accumulation_steps = 5 * 8
+
+    # this makes total number of tokens be 300B
+    max_iters = 600000
+    lr_decay_iters = 600000
+
+    # eval stuff
+    eval_interval = 1000
+    eval_iters = 200
+    log_interval = 10
+
+    # weight decay
+    weight_decay = 1e-1
+    ```
+
+    ### Key Configuration Details
+
+    | Parameter | Value | Description |
+    |-----------|-------|-------------|
+    | `batch_size` | 12 | Per-GPU batch size |
+    | `block_size` | 1024 | Context length (tokens) |
+    | `gradient_accumulation_steps` | 40 | Accumulate gradients across steps |
+    | **Effective Batch Size** | **491,520 tokens** | 12 × 1024 × 40 GPUs |
+    | `max_iters` | 600,000 | Total training iterations |
+    | **Total Tokens** | **~300B** | 491,520 × 600,000 |
+  </Step>
+
+  <Step title="Launch Training">
+    Use PyTorch's `torchrun` to launch distributed training across all GPUs:
+
+    ```bash
+    torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+    ```
+
+    <Tabs>
+      <Tab title="Single Node (8 GPUs)">
+        For a single node with 8 GPUs:
+
+        ```bash
+        torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+        ```
+
+        This uses PyTorch Distributed Data Parallel (DDP) to train across all 8 GPUs.
+      </Tab>
+
+      <Tab title="Multi-Node Setup">
+        If you have multiple GPU nodes, you can scale across them. See the [Multi-Node Training guide](/examples/multi-node) for details.
+
+        Example for 2 nodes (16 GPUs total):
+
+        ```bash
+        # Master node (IP: 123.456.123.456)
+        torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
+          --master_addr=123.456.123.456 --master_port=1234 \
+          train.py config/train_gpt2.py
+
+        # Worker node
+        torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 \
+          --master_addr=123.456.123.456 --master_port=1234 \
+          train.py config/train_gpt2.py
+        ```
+      </Tab>
+    </Tabs>
+
+    <Tip>
+    Run training in a `screen` or `tmux` session to prevent disconnection issues during the 4-day training run.
+    </Tip>
+  </Step>
+
+  <Step title="Monitor Training">
+    Training will take approximately **4 days** on 8x A100 40GB GPUs.
+
+    ### Expected Results
+
+    - **Final validation loss**: ~**2.85**
+    - **Training time**: ~**4 days**
+    - **Total tokens trained**: ~**300 billion**
+
+    ### Loss Progression
+
+    <Note>
+    The validation loss should steadily decrease from ~6.0 to ~2.85 over the 4-day training period.
+    </Note>
+
+    You can monitor training with:
+    - **Weights & Biases**: If `wandb_log=True` (default), view training curves at wandb.ai
+    - **Console logs**: Loss printed every 10 iterations
+    - **Checkpoints**: Saved periodically to `--out_dir` (default: `out/`)
+  </Step>
+
+  <Step title="Evaluate and Sample">
+    Once training completes, you can generate samples:
+
+    ```bash
+    python sample.py
+    ```
+
+    Or sample with a custom prompt:
+
+    ```bash
+    python sample.py \
+      --start="In a shocking turn of events," \
+      --num_samples=5 \
+      --max_new_tokens=200
+    ```
+  </Step>
+</Steps>
+
+## Baseline Comparisons
+
+OpenAI's GPT-2 checkpoints provide baselines for comparison. You can evaluate them on OpenWebText:
+
+```bash
+python train.py config/eval_gpt2.py
+python train.py config/eval_gpt2_medium.py
+python train.py config/eval_gpt2_large.py
+python train.py config/eval_gpt2_xl.py
+```
+
+### Results on OpenWebText
+
+| Model | Parameters | Train Loss | Val Loss |
+|-------|------------|------------|----------|
+| GPT-2 | 124M | 3.11 | 3.12 |
+| GPT-2 Medium | 350M | 2.85 | 2.84 |
+| GPT-2 Large | 774M | 2.66 | 2.67 |
+| GPT-2 XL | 1558M | 2.56 | 2.54 |
+| **nanoGPT 124M** | **124M** | **~2.85** | **~2.85** |
+
+<Note>
+**Important**: GPT-2 was trained on WebText (closed, never released), while OpenWebText is a best-effort reproduction. This creates a domain gap.
+
+The original GPT-2 124M checkpoint gets **3.11 val loss** on OpenWebText, but when **fine-tuned** on OpenWebText, it reaches **~2.85**, matching our reproduction.
+</Note>
+
+## Understanding the Domain Gap
+
+<Warning>
+The GPT-2 baseline (3.11 loss) is **not** the appropriate comparison target. Here's why:
+</Warning>
+
+1. **GPT-2 was trained on WebText** (private, never released)
+2. **OpenWebText is a reproduction** of WebText, but not identical
+3. **Domain gap exists** between the two datasets
+4. **Fair comparison**: Fine-tune GPT-2 on OpenWebText → reaches ~2.85 loss
+5. **Our reproduction**: Train from scratch on OpenWebText → reaches ~2.85 loss
+
+## Cost and Resource Optimization
+
+<CardGroup cols={2}>
+  <Card title="Reduce Model Size" icon="compress">
+    Train a smaller model if compute is limited (adjust `n_layer`, `n_head`, `n_embd`)
+  </Card>
+  <Card title="Fewer Iterations" icon="gauge-simple-low">
+    Stop training earlier (e.g., 300K iterations for ~3.0 loss)
+  </Card>
+  <Card title="Smaller Batch Size" icon="layer-group">
+    Reduce batch size and gradient accumulation steps
+  </Card>
+  <Card title="Cloud GPUs" icon="cloud">
+    Use Lambda Labs, AWS, GCP, or Azure for on-demand GPU access
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Out of Memory (OOM) errors">
+    Try:
+    - Reducing `batch_size` (e.g., from 12 to 6)
+    - Reducing `block_size` (e.g., from 1024 to 512)
+    - Using gradient checkpointing (modify `model.py`)
+    - Using mixed precision training (fp16/bf16)
+  </Accordion>
+
+  <Accordion title="Training is very slow">
+    Check:
+    - PyTorch 2.0+ with `torch.compile()` enabled
+    - CUDA version is up to date
+    - GPU utilization (`nvidia-smi`) is near 100%
+    - Not using `--compile=False` flag
+  </Accordion>
+
+  <Accordion title="Loss is not decreasing">
+    Verify:
+    - Dataset preparation completed successfully
+    - `train.bin` and `val.bin` exist and are large files
+    - Learning rate schedule is correct
+    - Gradient clipping is not too aggressive
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Multi-Node Training" icon="network-wired" href="/examples/multi-node">
+    Scale training across multiple GPU nodes
+  </Card>
+  <Card title="Fine-Tuning" icon="screwdriver-wrench" href="/training/finetuning">
+    Fine-tune the trained model on custom datasets
+  </Card>
+  <Card title="Model Architecture" icon="diagram-project" href="/model/architecture">
+    Understand the GPT architecture implementation
+  </Card>
+  <Card title="Advanced Config" icon="gears" href="/training/configuration">
+    Explore all configuration options
+  </Card>
+</CardGroup>

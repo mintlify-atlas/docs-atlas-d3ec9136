@@ -1,0 +1,221 @@
+---
+title: 'Using Pretrained Models'
+description: 'Load and use OpenAI GPT-2 checkpoints for finetuning in nanoGPT'
+icon: 'download'
+---
+
+## Loading Pretrained Checkpoints
+
+nanoGPT provides a convenient `from_pretrained()` method to load OpenAI's GPT-2 checkpoints. This method handles all the complexity of downloading weights from HuggingFace and converting them to nanoGPT's format.
+
+### The GPT.from_pretrained() Method
+
+Located in `model.py:206-261`, this class method is your gateway to pretrained models:
+
+```python
+@classmethod
+def from_pretrained(cls, model_type, override_args=None):
+    assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
+    override_args = override_args or {}
+    # only dropout can be overridden
+    assert all(k == 'dropout' for k in override_args)
+    from transformers import GPT2LMHeadModel
+    print("loading weights from pretrained gpt: %s" % model_type)
+    
+    # ... loading and conversion logic
+    return model
+```
+
+<Note>
+  The `from_pretrained()` method uses HuggingFace's transformers library to download the official OpenAI checkpoints, ensuring you get the exact same weights used in the GPT-2 paper.
+</Note>
+
+## Available Model Sizes
+
+All four OpenAI GPT-2 variants are supported. Here are the detailed specifications:
+
+### Model Architecture Details
+
+From `model.py:216-221`, here's how each model is configured:
+
+```python
+config_args = {
+    'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
+    'gpt2-medium':  dict(n_layer=24, n_head=16, n_embd=1024), # 350M params
+    'gpt2-large':   dict(n_layer=36, n_head=20, n_embd=1280), # 774M params
+    'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600), # 1558M params
+}[model_type]
+```
+
+### Model Size Comparison
+
+| Model | Parameters | Layers | Heads | Embedding | Context | Vocab Size |
+|-------|------------|--------|-------|-----------|---------|------------|
+| **gpt2** | 124M | 12 | 12 | 768 | 1024 | 50257 |
+| **gpt2-medium** | 350M | 24 | 16 | 1024 | 1024 | 50257 |
+| **gpt2-large** | 774M | 36 | 20 | 1280 | 1024 | 50257 |
+| **gpt2-xl** | 1558M | 48 | 25 | 1600 | 1024 | 50257 |
+
+<Tip>
+  All GPT-2 models share the same vocabulary size (50257 tokens) and context length (1024 tokens), making it easy to switch between model sizes without changing your data pipeline.
+</Tip>
+
+## Fixed Architecture Parameters
+
+When loading pretrained models, certain parameters are fixed and cannot be changed:
+
+```python
+print("forcing vocab_size=50257, block_size=1024, bias=True")
+config_args['vocab_size'] = 50257  # always 50257 for GPT model checkpoints
+config_args['block_size'] = 1024    # always 1024 for GPT model checkpoints
+config_args['bias'] = True          # always True for GPT model checkpoints
+```
+
+These values match OpenAI's original implementation and ensure compatibility with the pretrained weights.
+
+## Overriding Dropout
+
+The only parameter you can override when loading pretrained models is `dropout`:
+
+```python
+# Load with custom dropout rate
+model = GPT.from_pretrained('gpt2', override_args={'dropout': 0.2})
+```
+
+```python
+if 'dropout' in override_args:
+    print(f"overriding dropout rate to {override_args['dropout']}")
+    config_args['dropout'] = override_args['dropout']
+```
+
+<Warning>
+  You cannot override other parameters like `n_layer`, `n_head`, or `n_embd` because the pretrained weights are specifically shaped for the original architecture.
+</Warning>
+
+## Baseline Performance Numbers
+
+Before finetuning, it's useful to know the baseline performance of pretrained models on OpenWebText. These numbers come from evaluating the models directly:
+
+### OpenWebText Evaluation Results
+
+Run these commands to evaluate each model:
+
+```bash
+python train.py config/eval_gpt2.py
+python train.py config/eval_gpt2_medium.py
+python train.py config/eval_gpt2_large.py
+python train.py config/eval_gpt2_xl.py
+```
+
+### Performance Table
+
+| Model | Parameters | Train Loss | Val Loss |
+|-------|------------|------------|----------|
+| **gpt2** | 124M | 3.11 | 3.12 |
+| **gpt2-medium** | 350M | 2.85 | 2.84 |
+| **gpt2-large** | 774M | 2.66 | 2.67 |
+| **gpt2-xl** | 1558M | 2.56 | 2.54 |
+
+<Note>
+  These losses are on OpenWebText, not the original WebText dataset (which is closed and never released). There's a domain gap, so GPT-2 124M starts at ~3.11 but can be finetuned down to ~2.85 on OpenWebText.
+</Note>
+
+## Understanding the Domain Gap
+
+GPT-2 was trained on WebText (closed dataset), but we evaluate on OpenWebText (open reproduction). This creates a domain gap:
+
+- **Initial evaluation**: GPT-2 124M gets ~3.11 val loss on OpenWebText
+- **After finetuning**: The same model can reach ~2.85 val loss
+- **Implication**: When reproducing GPT-2, ~2.85 is the appropriate baseline, not 3.11
+
+## Loading in Training Scripts
+
+In your training configuration, simply set:
+
+```python
+# config/my_finetune.py
+init_from = 'gpt2-xl'  # or 'gpt2', 'gpt2-medium', 'gpt2-large'
+```
+
+The `train.py` script handles the rest:
+
+```python
+if init_from == 'gpt2':
+    model = GPT.from_pretrained('gpt2', override_args=dict(dropout=dropout))
+elif init_from == 'gpt2-medium':
+    model = GPT.from_pretrained('gpt2-medium', override_args=dict(dropout=dropout))
+# ... etc
+```
+
+## Weight Loading Process
+
+The `from_pretrained()` method performs several steps:
+
+1. **Download from HuggingFace** - Uses transformers library
+2. **Create nanoGPT model** - Initializes with matching architecture
+3. **Transpose Conv1D weights** - OpenAI uses Conv1D, nanoGPT uses Linear
+4. **Copy weights** - Transfers all parameters with shape validation
+5. **Return model** - Ready for training or inference
+
+```python
+# Key weight copying logic (simplified)
+for k in sd_keys_hf:
+    if any(k.endswith(w) for w in transposed):
+        # Conv1D weights need transposing
+        assert sd_hf[k].shape[::-1] == sd[k].shape
+        with torch.no_grad():
+            sd[k].copy_(sd_hf[k].t())
+    else:
+        # Direct copy for other parameters
+        assert sd_hf[k].shape == sd[k].shape
+        with torch.no_grad():
+            sd[k].copy_(sd_hf[k])
+```
+
+## Memory Requirements
+
+Different model sizes require different amounts of GPU memory:
+
+- **gpt2** (124M): ~2GB GPU memory
+- **gpt2-medium** (350M): ~4GB GPU memory
+- **gpt2-large** (774M): ~8GB GPU memory
+- **gpt2-xl** (1558M): ~16GB GPU memory
+
+<Tip>
+  If you run out of memory, try reducing `batch_size` or `block_size` in your config, or switch to a smaller model variant.
+</Tip>
+
+## Example: Loading and Sampling
+
+Here's a complete example of loading a pretrained model and generating text:
+
+```python
+from model import GPT
+import torch
+
+# Load pretrained model
+model = GPT.from_pretrained('gpt2-xl', override_args={'dropout': 0.0})
+model.eval()
+model.to('cuda')
+
+# Generate text
+start_ids = torch.tensor([1, 2, 3], dtype=torch.long, device='cuda')[None, ...]
+generated = model.generate(start_ids, max_new_tokens=100, temperature=0.8, top_k=200)
+
+print(generated)
+```
+
+Or use the provided sampling script:
+
+```bash
+python sample.py \
+    --init_from=gpt2-xl \
+    --start="What is the answer to life, the universe, and everything?" \
+    --num_samples=5 --max_new_tokens=100
+```
+
+## Next Steps
+
+<Card title="Finetune on Custom Data" icon="rocket" href="/finetuning/custom-datasets">
+  Now that you understand how to load pretrained models, learn how to finetune them on your own datasets with step-by-step examples.
+</Card>

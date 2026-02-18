@@ -1,313 +1,319 @@
 ---
 title: 'CausalSelfAttention'
-description: 'Multi-head causal self-attention with Flash Attention support'
+description: 'Multi-head causal self-attention mechanism with Flash Attention support'
 ---
 
-# CausalSelfAttention
+## Overview
 
-The `CausalSelfAttention` class implements multi-head causal self-attention, the core mechanism that allows the model to attend to previous positions in the sequence.
+`CausalSelfAttention` implements the core attention mechanism of the transformer. It performs multi-head self-attention with causal masking, ensuring each position can only attend to previous positions (autoregressive property).
+
+Defined in `model.py:29-76`.
 
 ## Class Definition
 
 ```python
 class CausalSelfAttention(nn.Module):
     def __init__(self, config: GPTConfig)
+    def forward(self, x: torch.Tensor) -> torch.Tensor
 ```
 
 ## Architecture
 
-The attention mechanism:
-1. Projects input to queries (Q), keys (K), and values (V)
-2. Splits into multiple attention heads
-3. Computes scaled dot-product attention with causal masking
-4. Concatenates heads and projects back to embedding dimension
+The attention module consists of:
 
 ```python
-# QKV projection (batched for efficiency)
-self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-
-# Output projection
-self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-
-# Dropout
-self.attn_dropout = nn.Dropout(config.dropout)
-self.resid_dropout = nn.Dropout(config.dropout)
+self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=bias)  # Q, K, V projections
+self.c_proj = nn.Linear(n_embd, n_embd, bias=bias)      # Output projection
+self.attn_dropout = nn.Dropout(dropout)                  # Attention dropout
+self.resid_dropout = nn.Dropout(dropout)                 # Residual dropout
 ```
 
-## Initialization
+## Constructor
+
+### `__init__(config: GPTConfig)`
+
+Initializes the attention mechanism.
 
 <ParamField path="config" type="GPTConfig" required>
-  Configuration object containing:
+  Configuration object. Key parameters used:
   - `n_embd`: Embedding dimension
   - `n_head`: Number of attention heads
+  - `block_size`: Maximum sequence length (for causal mask)
   - `dropout`: Dropout probability
   - `bias`: Whether to use bias in linear layers
-  - `block_size`: Maximum sequence length (for causal mask)
 </ParamField>
 
+**Requirements:**
+- `n_embd` must be divisible by `n_head`
+- Each head operates on dimension `head_dim = n_embd // n_head`
+
+**Behavior:**
+- Creates single linear layer for Q, K, V projections (3x n_embd outputs)
+- Detects Flash Attention support (PyTorch >= 2.0)
+- If Flash Attention unavailable, registers causal mask buffer
+
 ```python
-from model import GPTConfig, CausalSelfAttention
+from model import CausalSelfAttention, GPTConfig
 
 config = GPTConfig(n_embd=768, n_head=12, dropout=0.1)
 attn = CausalSelfAttention(config)
-```
 
-<Note>
-  The `n_embd` must be divisible by `n_head`. Each head has dimension `n_embd // n_head`.
-</Note>
+# Check attention implementation
+if attn.flash:
+    print("Using Flash Attention (fast)")
+else:
+    print("Using manual attention (slow)")
+```
 
 ## Forward Pass
 
-<ParamField path="x" type="torch.FloatTensor" required>
+### `forward(x: torch.Tensor) -> torch.Tensor`
+
+Computes multi-head causal self-attention.
+
+<ParamField path="x" type="torch.Tensor" required>
   Input tensor of shape `(batch_size, sequence_length, n_embd)`
 </ParamField>
 
-<ResponseField name="output" type="torch.FloatTensor">
-  Attention output of shape `(batch_size, sequence_length, n_embd)`
-</ResponseField>
+**Returns:** `torch.Tensor` of shape `(batch_size, sequence_length, n_embd)`
 
-```python
-# Input shape: (B, T, C) = (batch, sequence, embedding)
-y = attn(x)
-# Output shape: (B, T, C)
-```
+**Algorithm:**
 
-## Flash Attention
+1. **Project to Q, K, V** (model.py:56)
+   ```python
+   q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+   ```
 
-The implementation automatically uses Flash Attention when available (PyTorch >= 2.0):
+2. **Reshape for multi-head** (model.py:57-59)
+   ```python
+   B, T, C = x.size()
+   k = k.view(B, T, n_head, C // n_head).transpose(1, 2)  # (B, nh, T, hs)
+   q = q.view(B, T, n_head, C // n_head).transpose(1, 2)  # (B, nh, T, hs)
+   v = v.view(B, T, n_head, C // n_head).transpose(1, 2)  # (B, nh, T, hs)
+   ```
+   where `nh` = number of heads, `hs` = head size
 
-```python
-self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+3. **Compute attention** - Two implementations:
 
-if self.flash:
-    # Efficient Flash Attention implementation
-    y = torch.nn.functional.scaled_dot_product_attention(
-        q, k, v, 
-        attn_mask=None, 
-        dropout_p=self.dropout if self.training else 0,
-        is_causal=True
-    )
-else:
-    # Manual attention implementation
-    att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-    att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-    att = F.softmax(att, dim=-1)
-    att = self.attn_dropout(att)
-    y = att @ v
-```
+   **Option A: Flash Attention** (model.py:62-64)
+   ```python
+   y = torch.nn.functional.scaled_dot_product_attention(
+       q, k, v,
+       attn_mask=None,
+       dropout_p=self.dropout if self.training else 0,
+       is_causal=True
+   )
+   ```
+   
+   **Option B: Manual Implementation** (model.py:66-71)
+   ```python
+   # Compute attention scores
+   att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+   
+   # Apply causal mask
+   att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+   
+   # Softmax and dropout
+   att = F.softmax(att, dim=-1)
+   att = self.attn_dropout(att)
+   
+   # Apply attention to values
+   y = att @ v
+   ```
 
-<Tabs>
-  <Tab title="Flash Attention">
-    **Benefits:**
-    - ~3-5x faster on modern GPUs
-    - Reduced memory usage
-    - Better numerical stability
-    - Automatically fused operations
-    
-    **Requirements:**
-    - PyTorch >= 2.0
-    - CUDA-capable GPU
-    - Ampere (RTX 30xx) or newer recommended
-  </Tab>
-  
-  <Tab title="Manual Attention">
-    **Used when:**
-    - PyTorch < 2.0
-    - CPU inference
-    - Debugging attention patterns
-    
-    **Characteristics:**
-    - Explicit attention matrix computation
-    - Easier to inspect attention weights
-    - Slower but more transparent
-  </Tab>
-</Tabs>
+4. **Reassemble heads** (model.py:72)
+   ```python
+   y = y.transpose(1, 2).contiguous().view(B, T, C)
+   ```
 
-## Attention Computation
-
-### Step-by-Step Process
-
-1. **QKV Projection**
-```python
-# Single linear layer produces Q, K, V
-qkv = self.c_attn(x)  # (B, T, 3*C)
-q, k, v = qkv.split(self.n_embd, dim=2)  # Each: (B, T, C)
-```
-
-2. **Reshape for Multi-Head**
-```python
-# Reshape to separate heads
-B, T = x.size(0), x.size(1)
-head_dim = C // n_head
-
-q = q.view(B, T, n_head, head_dim).transpose(1, 2)  # (B, nh, T, hs)
-k = k.view(B, T, n_head, head_dim).transpose(1, 2)  # (B, nh, T, hs)
-v = v.view(B, T, n_head, head_dim).transpose(1, 2)  # (B, nh, T, hs)
-```
-
-3. **Scaled Dot-Product Attention**
-```python
-# Compute attention scores
-att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(head_dim))
-# Shape: (B, nh, T, T)
-
-# Apply causal mask (prevent attending to future)
-att = att.masked_fill(mask == 0, float('-inf'))
-
-# Normalize to probabilities
-att = F.softmax(att, dim=-1)
-
-# Apply dropout
-att = self.attn_dropout(att)
-
-# Weight values
-y = att @ v  # (B, nh, T, hs)
-```
-
-4. **Concatenate and Project**
-```python
-# Merge heads
-y = y.transpose(1, 2).contiguous().view(B, T, C)
-
-# Output projection
-y = self.resid_dropout(self.c_proj(y))
-```
-
-## Causal Masking
-
-Causal masking ensures the model can only attend to previous positions:
-
-```python
-# Causal mask (lower triangular)
-mask = torch.tril(torch.ones(block_size, block_size))
-# [[1, 0, 0, 0],
-#  [1, 1, 0, 0],
-#  [1, 1, 1, 0],
-#  [1, 1, 1, 1]]
-
-# Positions with 0 are masked with -inf before softmax
-att = att.masked_fill(mask == 0, float('-inf'))
-```
-
-<Note>
-  The causal mask is only needed in manual attention. Flash Attention uses the `is_causal=True` flag.
-</Note>
-
-## Example Usage
-
-### Standalone Usage
+5. **Output projection** (model.py:75)
+   ```python
+   y = self.resid_dropout(self.c_proj(y))
+   ```
 
 ```python
 import torch
-from model import GPTConfig, CausalSelfAttention
+from model import CausalSelfAttention, GPTConfig
 
-# Create attention layer
-config = GPTConfig(n_embd=768, n_head=12, dropout=0.1, block_size=1024)
+config = GPTConfig(n_embd=768, n_head=12)
 attn = CausalSelfAttention(config)
 
+# Example input: batch=2, seq_len=10, embd=768
+x = torch.randn(2, 10, 768)
+
 # Forward pass
-batch_size, seq_len = 4, 128
-x = torch.randn(batch_size, seq_len, config.n_embd)
-y = attn(x)
-
-print(f"Input shape: {x.shape}")   # (4, 128, 768)
-print(f"Output shape: {y.shape}")  # (4, 128, 768)
-print(f"Using Flash Attention: {attn.flash}")
+output = attn(x)
+print(output.shape)  # torch.Size([2, 10, 768])
 ```
 
-### Inspecting Attention Weights
+## Attention Mechanism Details
+
+### Causal Masking
+
+Causal masking ensures autoregressive generation - each position can only attend to previous positions:
+
+```
+Position:  0  1  2  3
+        0 [1  0  0  0]  ← Position 0 attends only to itself
+        1 [1  1  0  0]  ← Position 1 attends to 0,1
+        2 [1  1  1  0]  ← Position 2 attends to 0,1,2
+        3 [1  1  1  1]  ← Position 3 attends to 0,1,2,3
+```
+
+Implementation uses a lower triangular mask (model.py:49-50):
+```python
+self.bias = torch.tril(torch.ones(block_size, block_size))
+             .view(1, 1, block_size, block_size)
+```
+
+### Multi-Head Attention
+
+Multiple attention heads allow the model to attend to different representation subspaces:
+
+- **Single-head**: Attends to one relationship pattern
+- **Multi-head**: Each head learns different patterns (syntax, semantics, long-range dependencies, etc.)
+
+**Example with n_head=12, n_embd=768:**
+- Each head size: 768 / 12 = 64 dimensions
+- 12 parallel attention computations
+- Outputs concatenated and projected back to 768 dimensions
+
+### Scaled Dot-Product Attention
+
+The attention formula:
+
+```
+Attention(Q, K, V) = softmax(QK^T / √d_k) V
+```
+
+- **QK^T**: Computes similarity between queries and keys
+- **√d_k scaling**: Prevents softmax saturation for large dimensions
+- **softmax**: Converts scores to probabilities
+- **Multiply by V**: Weighted sum of values
+
+## Flash Attention vs Manual
+
+### Flash Attention (PyTorch >= 2.0)
+
+<ResponseField name="Advantages">
+  - **Faster**: Optimized CUDA kernels
+  - **Memory efficient**: O(N) memory vs O(N²) for standard attention
+  - **Automatic**: Handles causal masking internally
+</ResponseField>
+
+<ResponseField name="Implementation">
+  Uses `torch.nn.functional.scaled_dot_product_attention` with `is_causal=True` (model.py:64)
+</ResponseField>
+
+### Manual Implementation
+
+<ResponseField name="When Used">
+  Fallback for PyTorch < 2.0
+</ResponseField>
+
+<ResponseField name="Implementation">
+  Explicit attention computation with causal mask buffer (model.py:66-71)
+</ResponseField>
+
+<ResponseField name="Drawbacks">
+  - Slower (no kernel fusion)
+  - More memory (stores full attention matrix)
+  - Requires pre-registered causal mask buffer
+</ResponseField>
+
+## Configuration Impact
+
+### Number of Heads
 
 ```python
-# Disable Flash Attention to access attention matrix
-attn.flash = False
+# Fewer heads (6) - less diverse attention patterns
+config = GPTConfig(n_embd=768, n_head=6)   # head_size = 128
 
-# Modified forward to return attention weights
-def forward_with_weights(self, x):
-    B, T, C = x.size()
-    q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-    
-    k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-    q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-    v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-    
-    att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-    att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-    att = F.softmax(att, dim=-1)
-    
-    y = att @ v
-    y = y.transpose(1, 2).contiguous().view(B, T, C)
-    y = self.resid_dropout(self.c_proj(y))
-    
-    return y, att  # Return attention weights too
+# More heads (12) - more diverse patterns, standard for GPT-2
+config = GPTConfig(n_embd=768, n_head=12)  # head_size = 64
+
+# Many heads (16) - very diverse, used in GPT-2 Medium
+config = GPTConfig(n_embd=1024, n_head=16) # head_size = 64
 ```
 
-## Performance Characteristics
-
-| Aspect | Flash Attention | Manual Attention |
-|--------|----------------|------------------|
-| Speed (training) | ~3-5x faster | Baseline |
-| Memory | ~2-3x less | Baseline |
-| Requires | PyTorch 2.0+, CUDA | Any PyTorch |
-| Attention inspection | Not available | Available |
-
-## Multi-Head Attention Benefits
-
-Using multiple heads allows the model to:
-- Attend to different positions simultaneously
-- Learn different aspects of relationships
-- Increase model capacity without increasing depth
+### Dropout
 
 ```python
-# Example: 12 heads with 768 dimensions
-n_head = 12
-n_embd = 768
-head_dim = n_embd // n_head  # 64
+# Training: use dropout for regularization
+config = GPTConfig(dropout=0.1)
+attn = CausalSelfAttention(config)
+model.train()  # Applies 10% dropout
 
-# Each head operates on a 64-dimensional subspace
-# All heads run in parallel
+# Inference: disable dropout
+config = GPTConfig(dropout=0.0)
+attn = CausalSelfAttention(config)
+model.eval()   # No dropout
 ```
 
-## Implementation Details
+## Usage in Transformer Block
 
-### Weight Initialization
-
-Weights are initialized in the parent GPT class:
-- QKV projection: Normal(0, 0.02)
-- Output projection: Scaled by `0.02/sqrt(2*n_layer)` for stability
-
-### Dropout Application
-
-Two dropout layers:
-1. **Attention dropout**: Applied to attention weights after softmax
-2. **Residual dropout**: Applied to output before residual connection
+Attention is used within a residual connection:
 
 ```python
-self.attn_dropout = nn.Dropout(config.dropout)  # On attention matrix
-self.resid_dropout = nn.Dropout(config.dropout)  # On output
+# From Block class (model.py:104)
+x = x + self.attn(self.ln_1(x))
+#   ^   ^^^^^^^^^^ CausalSelfAttention
+#   └─ Residual connection
 ```
 
-## Common Patterns
+See [Block](/api/blocks) for full context.
 
-### Disable Dropout for Inference
+## Performance Considerations
+
+<Expandable title="Memory Complexity">
+  Attention has O(N²) memory complexity in sequence length:
+  
+  - **Attention matrix**: (batch_size, n_head, seq_len, seq_len)
+  - For seq_len=1024, n_head=12: ~150M elements per batch item
+  - Flash Attention reduces this significantly through kernel fusion
+</Expandable>
+
+<Expandable title="Computational Complexity">
+  - **QK^T multiplication**: O(N² × d)
+  - **Attention × V**: O(N² × d)
+  - Total: O(N² × d) where N is sequence length, d is head dimension
+  - Bottleneck for long sequences
+</Expandable>
+
+## Complete Example
 
 ```python
-model.eval()  # Automatically disables dropout
+import torch
+import torch.nn as nn
+from model import CausalSelfAttention, GPTConfig
 
-# Or manually
-attn.attn_dropout.p = 0.0
-attn.resid_dropout.p = 0.0
+# Setup
+config = GPTConfig(
+    n_embd=768,
+    n_head=12,
+    dropout=0.1,
+    block_size=1024
+)
+attn = CausalSelfAttention(config)
+
+# Training
+attn.train()
+x = torch.randn(4, 64, 768)  # batch=4, seq=64, embd=768
+output = attn(x)
+print(f"Output shape: {output.shape}")  # [4, 64, 768]
+
+# Inference
+attn.eval()
+with torch.no_grad():
+    output = attn(x)
+
+# Check parameters
+num_params = sum(p.numel() for p in attn.parameters())
+print(f"Attention parameters: {num_params:,}")  # ~2.4M for n_embd=768
 ```
 
-### Change Number of Heads
+## Related Components
 
-```python
-# Must retrain from scratch
-config = GPTConfig(n_embd=768, n_head=16)  # Was 12
-model = GPT(config)
-```
-
-## See Also
-
-- [Block](/api/block) - Transformer block containing attention + MLP
-- [GPT](/api/gpt) - Main model class
-- [MLP](/api/mlp) - Feed-forward network component
+- [Block](/api/blocks) - Transformer block that contains CausalSelfAttention
+- [GPTConfig](/api/gpt-config) - Configuration for attention parameters
+- [GPT](/api/gpt-model) - Main model using attention mechanism

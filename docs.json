@@ -3,8 +3,8 @@
   "name": "nanoGPT",
   "theme": "aspen",
   "colors": {
-    "primary": "#10b981",
-    "light": "#34d399",
+    "primary": "#10B981",
+    "light": "#34D399",
     "dark": "#059669"
   },
   "favicon": "/favicon.webp",
@@ -25,41 +25,37 @@
         "tab": "Documentation",
         "groups": [
           {
-            "group": "Get Started",
-            "pages": ["introduction", "installation", "quickstart"]
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
           },
           {
             "group": "Training",
             "pages": [
               "training/overview",
-              "training/shakespeare",
-              "training/gpt2-reproduction",
-              "training/finetuning",
-              "training/distributed"
+              "training/from-scratch",
+              "training/distributed",
+              "training/configuration"
             ]
           },
           {
-            "group": "Model",
+            "group": "Finetuning",
             "pages": [
-              "model/architecture",
-              "model/configuration",
-              "model/inference"
+              "finetuning/overview",
+              "finetuning/pretrained-models",
+              "finetuning/custom-datasets"
             ]
           },
           {
-            "group": "Data",
+            "group": "Guides",
             "pages": [
-              "data/preparation",
-              "data/datasets",
-              "data/tokenization"
-            ]
-          },
-          {
-            "group": "Advanced",
-            "pages": [
-              "advanced/performance",
-              "advanced/scaling-laws",
-              "advanced/hyperparameters"
+              "guides/data-preparation",
+              "guides/sampling",
+              "guides/benchmarking",
+              "guides/optimization"
             ]
           }
         ]
@@ -68,20 +64,35 @@
         "tab": "API Reference",
         "groups": [
           {
-            "group": "Core",
+            "group": "Core Modules",
             "pages": [
-              "api/gpt",
-              "api/gpt-config",
+              "api/model",
               "api/training",
-              "api/sampling"
+              "api/sampling",
+              "api/configuration"
             ]
           },
           {
-            "group": "Components",
+            "group": "Model Architecture",
             "pages": [
+              "api/gpt-config",
+              "api/gpt-model",
               "api/attention",
-              "api/mlp",
-              "api/block"
+              "api/blocks"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Examples",
+        "groups": [
+          {
+            "group": "Use Cases",
+            "pages": [
+              "examples/shakespeare",
+              "examples/gpt2-reproduction",
+              "examples/single-gpu",
+              "examples/multi-node"
             ]
           }
         ]

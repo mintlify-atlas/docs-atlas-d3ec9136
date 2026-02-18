@@ -1,0 +1,503 @@
+---
+title: 'Transformer Building Blocks'
+description: 'Block, MLP, and LayerNorm components that compose the transformer architecture'
+---
+
+## Overview
+
+This page documents the three fundamental building blocks of the GPT transformer:
+
+- **Block**: Complete transformer block combining attention and feedforward
+- **MLP**: Feedforward network (Multi-Layer Perceptron)
+- **LayerNorm**: Layer normalization with optional bias
+
+These components stack together to form the complete GPT architecture.
+
+---
+
+## Block
+
+The `Block` class represents a single transformer layer with pre-normalization and residual connections.
+
+Defined in `model.py:94-106`.
+
+### Class Definition
+
+```python
+class Block(nn.Module):
+    def __init__(self, config: GPTConfig)
+    def forward(self, x: torch.Tensor) -> torch.Tensor
+```
+
+### Architecture
+
+A Block consists of four components:
+
+```python
+self.ln_1 = LayerNorm(n_embd, bias=bias)      # Pre-attention norm
+self.attn = CausalSelfAttention(config)       # Multi-head attention
+self.ln_2 = LayerNorm(n_embd, bias=bias)      # Pre-MLP norm
+self.mlp = MLP(config)                        # Feedforward network
+```
+
+### Constructor
+
+<ParamField path="config" type="GPTConfig" required>
+  Configuration object specifying model hyperparameters (n_embd, n_head, dropout, bias, etc.)
+</ParamField>
+
+```python
+from model import Block, GPTConfig
+
+config = GPTConfig(n_embd=768, n_head=12)
+block = Block(config)
+```
+
+### Forward Pass
+
+Implements the pre-normalization transformer block with residual connections (model.py:103-106):
+
+```python
+def forward(self, x):
+    x = x + self.attn(self.ln_1(x))  # Attention with residual
+    x = x + self.mlp(self.ln_2(x))   # MLP with residual
+    return x
+```
+
+**Process:**
+1. **Attention branch**: LayerNorm → CausalSelfAttention → Residual add
+2. **MLP branch**: LayerNorm → MLP → Residual add
+
+<ParamField path="x" type="torch.Tensor" required>
+  Input tensor of shape `(batch_size, sequence_length, n_embd)`
+</ParamField>
+
+**Returns:** `torch.Tensor` of shape `(batch_size, sequence_length, n_embd)`
+
+```python
+import torch
+
+config = GPTConfig(n_embd=768)
+block = Block(config)
+
+x = torch.randn(2, 10, 768)  # batch=2, seq=10, embd=768
+output = block(x)
+print(output.shape)  # torch.Size([2, 10, 768])
+```
+
+### Pre-Normalization Architecture
+
+The Block uses **pre-normalization** (LayerNorm before sub-layers) rather than post-normalization:
+
+<CodeGroup>
+
+```python Pre-Normalization (used in nanoGPT)
+x = x + attn(ln(x))
+x = x + mlp(ln(x))
+```
+
+```python Post-Normalization (original Transformer)
+x = ln(x + attn(x))
+x = ln(x + mlp(x))
+```
+
+</CodeGroup>
+
+**Benefits of pre-normalization:**
+- More stable training
+- Better gradient flow
+- Standard in modern transformers (GPT, LLaMA, etc.)
+
+### Residual Connections
+
+Residual connections (model.py:104-105) enable:
+- **Gradient flow**: Direct path for gradients through deep networks
+- **Identity mapping**: Model can learn to skip blocks if needed
+- **Stable training**: Prevents degradation in very deep models
+
+```
+Input (x)
+   │
+   ├─→ LayerNorm ──→ Attention ──┐
+   │                              │
+   └──────────────(ADD)───────────┘
+   │
+   ├─→ LayerNorm ──→ MLP ─────────┐
+   │                              │
+   └──────────────(ADD)───────────┘
+   │
+  Output
+```
+
+---
+
+## MLP
+
+The `MLP` class implements a two-layer feedforward network with GELU activation.
+
+Defined in `model.py:78-92`.
+
+### Class Definition
+
+```python
+class MLP(nn.Module):
+    def __init__(self, config: GPTConfig)
+    def forward(self, x: torch.Tensor) -> torch.Tensor
+```
+
+### Architecture
+
+```python
+self.c_fc = nn.Linear(n_embd, 4 * n_embd, bias=bias)    # Expand 4x
+self.gelu = nn.GELU()                                    # Activation
+self.c_proj = nn.Linear(4 * n_embd, n_embd, bias=bias)  # Project back
+self.dropout = nn.Dropout(dropout)                       # Regularization
+```
+
+**Key characteristic:** The hidden dimension is **4× the embedding dimension** (model.py:82,84).
+
+### Constructor
+
+<ParamField path="config" type="GPTConfig" required>
+  Configuration object. Uses `n_embd`, `dropout`, and `bias` parameters.
+</ParamField>
+
+```python
+from model import MLP, GPTConfig
+
+config = GPTConfig(n_embd=768, dropout=0.1)
+mlp = MLP(config)
+```
+
+### Forward Pass
+
+```python
+def forward(self, x):
+    x = self.c_fc(x)      # (B, T, n_embd) -> (B, T, 4*n_embd)
+    x = self.gelu(x)      # Apply activation
+    x = self.c_proj(x)    # (B, T, 4*n_embd) -> (B, T, n_embd)
+    x = self.dropout(x)   # Regularization
+    return x
+```
+
+<ParamField path="x" type="torch.Tensor" required>
+  Input tensor of shape `(batch_size, sequence_length, n_embd)`
+</ParamField>
+
+**Returns:** `torch.Tensor` of shape `(batch_size, sequence_length, n_embd)`
+
+```python
+import torch
+
+config = GPTConfig(n_embd=768)
+mlp = MLP(config)
+
+x = torch.randn(2, 10, 768)   # batch=2, seq=10, embd=768
+output = mlp(x)
+print(output.shape)           # torch.Size([2, 10, 768])
+```
+
+### GELU Activation
+
+GELU (Gaussian Error Linear Unit) is used instead of ReLU:
+
+```python
+GELU(x) = x × Φ(x)
+```
+where Φ(x) is the cumulative distribution function of the standard normal distribution.
+
+**Properties:**
+- Smooth, non-monotonic function
+- Better performance than ReLU in transformers
+- Standard in GPT, BERT, and modern language models
+
+<Expandable title="GELU vs ReLU">
+  ```python
+  # ReLU: Sharp cutoff at 0
+  ReLU(x) = max(0, x)
+  
+  # GELU: Smooth transition
+  GELU(x) = x × Φ(x)  # Smooth curve
+  ```
+  
+  GELU allows small negative values to pass through (weighted by Gaussian CDF), providing smoother gradients.
+</Expandable>
+
+### 4x Expansion
+
+The MLP expands to **4× the embedding dimension** in the hidden layer:
+
+```python
+n_embd=768  → hidden_dim=3072 → n_embd=768
+n_embd=1024 → hidden_dim=4096 → n_embd=1024
+```
+
+**Why 4×?**
+- Increases model capacity
+- Follows GPT-2 and GPT-3 architecture
+- Most parameters in the transformer are in MLP layers
+
+---
+
+## LayerNorm
+
+Custom LayerNorm implementation with optional bias parameter.
+
+Defined in `model.py:18-27`.
+
+### Class Definition
+
+```python
+class LayerNorm(nn.Module):
+    """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
+    
+    def __init__(self, ndim: int, bias: bool)
+    def forward(self, input: torch.Tensor) -> torch.Tensor
+```
+
+### Architecture
+
+```python
+self.weight = nn.Parameter(torch.ones(ndim))                    # Scale (γ)
+self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None  # Shift (β)
+```
+
+### Constructor
+
+<ParamField path="ndim" type="int" required>
+  Dimensionality of the layer (typically n_embd)
+</ParamField>
+
+<ParamField path="bias" type="bool" required>
+  Whether to include bias parameter (β)
+  - `True`: Standard LayerNorm with scale and shift
+  - `False`: Only scale parameter (slightly faster, often performs better)
+</ParamField>
+
+```python
+from model import LayerNorm
+
+# With bias (standard)
+ln_with_bias = LayerNorm(768, bias=True)
+
+# Without bias (faster)
+ln_no_bias = LayerNorm(768, bias=False)
+```
+
+### Forward Pass
+
+```python
+def forward(self, input):
+    return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+```
+
+Applies layer normalization:
+
+```
+LayerNorm(x) = γ × (x - μ) / √(σ² + ε) + β
+```
+
+where:
+- μ: mean of x
+- σ²: variance of x
+- ε: 1e-5 (numerical stability)
+- γ: learned scale (self.weight)
+- β: learned shift (self.bias, optional)
+
+<ParamField path="input" type="torch.Tensor" required>
+  Input tensor of any shape, normalized over the last dimension
+</ParamField>
+
+**Returns:** Normalized tensor with same shape as input
+
+```python
+import torch
+
+ln = LayerNorm(768, bias=True)
+x = torch.randn(2, 10, 768)
+output = ln(x)
+
+print(output.shape)                    # torch.Size([2, 10, 768])
+print(output.mean(dim=-1))             # ~0 (normalized)
+print(output.std(dim=-1))              # ~1 (normalized)
+```
+
+### Why Custom LayerNorm?
+
+PyTorch's built-in `nn.LayerNorm` doesn't support `bias=False` directly. This custom implementation allows:
+- Disabling bias for efficiency (fewer parameters)
+- Consistent API with other nanoGPT components
+- Slightly faster when bias=False
+
+---
+
+## How Components Compose
+
+Here's how Block, MLP, LayerNorm, and CausalSelfAttention work together:
+
+```python
+# Single transformer block
+class Block(nn.Module):
+    def __init__(self, config):
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.attn = CausalSelfAttention(config)
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.mlp = MLP(config)
+    
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))  # Normalize → Attend → Residual
+        x = x + self.mlp(self.ln_2(x))   # Normalize → FFN → Residual
+        return x
+
+# Full GPT model stacks multiple blocks
+class GPT(nn.Module):
+    def __init__(self, config):
+        # ...
+        self.h = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        # ...
+    
+    def forward(self, x):
+        # ...
+        for block in self.h:
+            x = block(x)  # Apply each transformer block sequentially
+        # ...
+```
+
+### Complete Flow Through One Block
+
+```
+Input x (shape: B × T × n_embd)
+    │
+    ├──────────────────────────┐
+    │                          │
+    │   ┌──────────────┐      │
+    │   │  LayerNorm   │      │
+    │   └──────┬───────┘      │
+    │          │               │
+    │   ┌──────▼────────────┐ │
+    │   │ CausalSelfAttn    │ │
+    │   │ (Multi-head)      │ │
+    │   └──────┬────────────┘ │
+    │          │               │
+    └──────(ADD)──────────────┘
+    │
+    ├──────────────────────────┐
+    │                          │
+    │   ┌──────────────┐      │
+    │   │  LayerNorm   │      │
+    │   └──────┬───────┘      │
+    │          │               │
+    │   ┌──────▼────────────┐ │
+    │   │      MLP          │ │
+    │   │  (4x expansion)   │ │
+    │   └──────┬────────────┘ │
+    │          │               │
+    └──────(ADD)──────────────┘
+    │
+Output (shape: B × T × n_embd)
+```
+
+## Parameter Count
+
+For a single block with n_embd=768:
+
+```python
+config = GPTConfig(n_embd=768, n_head=12)
+block = Block(config)
+
+num_params = sum(p.numel() for p in block.parameters())
+print(f"Block parameters: {num_params:,}")  # ~7M parameters
+
+# Breakdown:
+# - LayerNorm (ln_1): 768 × 2 = 1,536
+# - CausalSelfAttention: ~2.4M
+# - LayerNorm (ln_2): 768 × 2 = 1,536  
+# - MLP: ~4.7M
+```
+
+Most parameters are in the MLP (due to 4× expansion).
+
+## Complete Usage Example
+
+```python
+import torch
+from model import Block, MLP, LayerNorm, GPTConfig
+
+# Configuration
+config = GPTConfig(
+    n_embd=768,
+    n_head=12,
+    dropout=0.1,
+    bias=True
+)
+
+# Individual components
+ln = LayerNorm(768, bias=True)
+mlp = MLP(config)
+block = Block(config)
+
+# Sample input
+x = torch.randn(4, 32, 768)  # batch=4, seq=32, embd=768
+
+# Test LayerNorm
+x_norm = ln(x)
+print(f"After LayerNorm: mean={x_norm.mean():.4f}, std={x_norm.std():.4f}")
+
+# Test MLP
+x_mlp = mlp(x)
+print(f"After MLP: {x_mlp.shape}")  # torch.Size([4, 32, 768])
+
+# Test full Block
+x_block = block(x)
+print(f"After Block: {x_block.shape}")  # torch.Size([4, 32, 768])
+
+# Stack multiple blocks (like in GPT)
+layers = nn.ModuleList([Block(config) for _ in range(12)])
+for layer in layers:
+    x = layer(x)
+print(f"After 12 blocks: {x.shape}")  # torch.Size([4, 32, 768])
+```
+
+## Configuration Examples
+
+### Standard GPT-2 Block
+
+```python
+config = GPTConfig(
+    n_embd=768,
+    n_head=12,
+    dropout=0.0,
+    bias=True  # GPT-2 uses bias
+)
+block = Block(config)
+```
+
+### Optimized Block (no bias)
+
+```python
+config = GPTConfig(
+    n_embd=768,
+    n_head=12,
+    dropout=0.0,
+    bias=False  # Faster, often better
+)
+block = Block(config)
+```
+
+### Small Model Block
+
+```python
+config = GPTConfig(
+    n_embd=384,
+    n_head=6,
+    dropout=0.1,
+    bias=False
+)
+block = Block(config)
+```
+
+## Related Components
+
+- [CausalSelfAttention](/api/attention) - Attention mechanism used in Block
+- [GPT](/api/gpt-model) - Main model that stacks multiple Blocks
+- [GPTConfig](/api/gpt-config) - Configuration for all components

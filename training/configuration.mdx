@@ -1,0 +1,579 @@
+---
+title: Configuration System
+description: Master nanoGPT's Poor Man's Configurator for flexible training configuration
+---
+
+## Overview
+
+nanoGPT uses a simple, hackable configuration system called the "Poor Man's Configurator" (configurator.py). It allows you to:
+
+- Use **config files** (Python scripts in `config/`)
+- Override parameters via **command-line arguments**
+- Combine both approaches for maximum flexibility
+
+<Info>
+**Design Philosophy:**
+
+The configurator is intentionally simple to avoid configuration complexity. It directly modifies `globals()` so you don't need to prepend `config.` to every variable. While unconventional, it keeps the code minimal and readable.
+</Info>
+
+## How It Works
+
+### Integration in train.py
+
+The configurator is executed directly in train.py:77:
+
+```python
+config_keys = [k for k,v in globals().items() 
+               if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
+exec(open('configurator.py').read())  # Overrides from command line or config file
+config = {k: globals()[k] for k in config_keys}  # For logging
+```
+
+This runs `configurator.py` which processes:
+1. Config file arguments (without `--` prefix)
+2. Key-value overrides (with `--key=value` syntax)
+
+### Configurator Logic (configurator.py)
+
+```python
+import sys
+from ast import literal_eval
+
+for arg in sys.argv[1:]:
+    if '=' not in arg:
+        # Assume it's a config file path
+        assert not arg.startswith('--')
+        config_file = arg
+        print(f"Overriding config with {config_file}:")
+        with open(config_file) as f:
+            print(f.read())
+        exec(open(config_file).read())  # Execute config file
+    else:
+        # Assume it's a --key=value argument
+        assert arg.startswith('--')
+        key, val = arg.split('=')
+        key = key[2:]  # Remove '--' prefix
+        if key in globals():
+            try:
+                # Try to eval it (for bool, number, list, etc.)
+                attempt = literal_eval(val)
+            except (SyntaxError, ValueError):
+                # Fall back to string
+                attempt = val
+            # Type checking
+            assert type(attempt) == type(globals()[key])
+            print(f"Overriding: {key} = {attempt}")
+            globals()[key] = attempt
+        else:
+            raise ValueError(f"Unknown config key: {key}")
+```
+
+## Usage Patterns
+
+### 1. Default Configuration
+
+Run with built-in defaults (train.py:34-74):
+
+```bash
+python train.py
+```
+
+This uses:
+- GPT-2 124M architecture (12 layers, 12 heads, 768 dim)
+- OpenWebText dataset
+- Batch size 12, block size 1024
+- Learning rate 6e-4 with cosine decay
+
+### 2. Config File Only
+
+Use a predefined config file:
+
+```bash
+python train.py config/train_shakespeare_char.py
+```
+
+All parameters in the config file override defaults.
+
+### 3. Command-Line Overrides Only
+
+Override specific parameters:
+
+```bash
+python train.py --batch_size=32 --learning_rate=3e-4 --compile=False
+```
+
+### 4. Config File + Overrides (Recommended)
+
+Start with a config file and override specific values:
+
+```bash
+python train.py config/train_gpt2.py --max_iters=100000 --eval_interval=500
+```
+
+**Processing order:**
+1. Load defaults from train.py
+2. Apply config file
+3. Apply command-line overrides
+
+<Note>
+Command-line arguments always take precedence over config files, which override defaults.
+</Note>
+
+## Config File Examples
+
+### GPT-2 124M Training (config/train_gpt2.py)
+
+```python
+# Train GPT-2 (124M) to loss ~2.85 on 8× A100 40GB
+# Launch: torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+
+wandb_log = True
+wandb_project = 'owt'
+wandb_run_name = 'gpt2-124M'
+
+# Total batch size = ~0.5M tokens
+# 12 batch_size × 1024 block_size × 40 grad_accum × 8 GPUs = 491,520
+batch_size = 12
+block_size = 1024
+gradient_accumulation_steps = 40  # 5 × 8 GPUs
+
+# Total tokens: 300B (600K iters × 0.5M tokens)
+max_iters = 600000
+lr_decay_iters = 600000
+
+# Evaluation
+eval_interval = 1000
+eval_iters = 200
+log_interval = 10
+
+# Optimization
+weight_decay = 1e-1
+```
+
+### Shakespeare Character-Level (config/train_shakespeare_char.py)
+
+```python
+# Train a miniature character-level Shakespeare model
+# Good for debugging and playing on MacBooks
+
+out_dir = 'out-shakespeare-char'
+eval_interval = 250
+eval_iters = 200
+log_interval = 10
+
+# Only save when val improves (small dataset, will overfit)
+always_save_checkpoint = False
+
+wandb_log = False
+wandb_project = 'shakespeare-char'
+wandb_run_name = 'mini-gpt'
+
+dataset = 'shakespeare_char'
+gradient_accumulation_steps = 1
+batch_size = 64
+block_size = 256  # Context of up to 256 characters
+
+# Baby GPT model
+n_layer = 6
+n_head = 6
+n_embd = 384
+dropout = 0.2
+
+learning_rate = 1e-3  # Higher LR for small networks
+max_iters = 5000
+lr_decay_iters = 5000
+min_lr = 1e-4
+beta2 = 0.99  # Larger because tokens per iter is small
+
+warmup_iters = 100
+
+# On MacBook also add:
+# device = 'cpu'  # Run on CPU only
+# compile = False  # Do not torch compile
+```
+
+### Fine-tuning GPT-2 XL (config/finetune_shakespeare.py)
+
+```python
+import time
+
+out_dir = 'out-shakespeare'
+eval_interval = 5
+eval_iters = 40
+wandb_log = False
+wandb_project = 'shakespeare'
+wandb_run_name = 'ft-' + str(time.time())
+
+dataset = 'shakespeare'
+init_from = 'gpt2-xl'  # Largest GPT-2 model (1.5B params)
+
+# Only save when validation improves
+always_save_checkpoint = False
+
+# Batch configuration
+# 1 batch × 32 grad_accum × 1024 tokens = 32,768 tokens/iter
+# Shakespeare has 301,966 tokens, so 1 epoch ≈ 9.2 iters
+batch_size = 1
+gradient_accumulation_steps = 32
+max_iters = 20
+
+# Fine-tune at constant LR (no decay)
+learning_rate = 3e-5
+decay_lr = False
+```
+
+### Evaluation Only (config/eval_gpt2.py)
+
+```python
+# Evaluate the base GPT-2 model
+# n_layer=12, n_head=12, n_embd=768 (124M parameters)
+
+batch_size = 8
+eval_iters = 500  # Use more iterations for accurate estimate
+eval_only = True
+wandb_log = False
+init_from = 'gpt2'
+```
+
+## Key Training Parameters
+
+### Model Architecture
+
+```python
+n_layer = 12          # Number of transformer layers
+n_head = 12           # Number of attention heads
+n_embd = 768          # Embedding dimension
+block_size = 1024     # Context length (max sequence length)
+dropout = 0.0         # Dropout rate (0 for pretraining, 0.1+ for finetuning)
+bias = False          # Use bias in LayerNorm and Linear layers
+```
+
+<Tabs>
+  <Tab title="GPT-2 124M">
+    ```python
+    n_layer = 12
+    n_head = 12
+    n_embd = 768
+    # Total params: ~124M
+    ```
+  </Tab>
+  <Tab title="GPT-2 Medium (350M)">
+    ```python
+    n_layer = 24
+    n_head = 16
+    n_embd = 1024
+    # Total params: ~350M
+    ```
+  </Tab>
+  <Tab title="GPT-2 Large (774M)">
+    ```python
+    n_layer = 36
+    n_head = 20
+    n_embd = 1280
+    # Total params: ~774M
+    ```
+  </Tab>
+  <Tab title="Baby GPT">
+    ```python
+    n_layer = 6
+    n_head = 6
+    n_embd = 384
+    # Total params: ~10M
+    ```
+  </Tab>
+</Tabs>
+
+### Training Hyperparameters
+
+```python
+# Batching
+batch_size = 12                    # Micro-batch size per GPU
+gradient_accumulation_steps = 40   # Accumulate gradients over N steps
+# Effective batch size = batch_size × grad_accum_steps × num_gpus × block_size
+
+# Optimization
+learning_rate = 6e-4    # Peak learning rate
+max_iters = 600000      # Total training iterations
+weight_decay = 1e-1     # AdamW weight decay
+beta1 = 0.9             # Adam momentum
+beta2 = 0.95            # Adam second moment
+grad_clip = 1.0         # Gradient clipping norm (0 to disable)
+
+# Learning rate schedule
+decay_lr = True         # Enable cosine decay
+warmup_iters = 2000     # Linear warmup steps
+lr_decay_iters = 600000 # Decay over this many steps
+min_lr = 6e-5           # Final learning rate (~lr/10)
+```
+
+### Data and I/O
+
+```python
+# Dataset
+dataset = 'openwebtext'         # Dataset name (must have data/{dataset}/ folder)
+init_from = 'scratch'           # 'scratch', 'resume', or 'gpt2*'
+
+# Checkpointing
+out_dir = 'out'                 # Output directory for checkpoints
+eval_interval = 2000            # Evaluate every N iterations
+log_interval = 1                # Log every N iterations
+eval_iters = 200                # Number of batches for evaluation
+eval_only = False               # Only evaluate, don't train
+always_save_checkpoint = True   # Save checkpoint every eval_interval
+
+# Weights & Biases
+wandb_log = False               # Enable W&B logging
+wandb_project = 'owt'           # W&B project name
+wandb_run_name = 'gpt2'         # W&B run name
+```
+
+### System Configuration
+
+```python
+# Hardware
+device = 'cuda'         # 'cpu', 'cuda', 'cuda:0', 'mps' (Apple Silicon)
+dtype = 'bfloat16'      # 'float32', 'bfloat16', 'float16'
+compile = True          # Use PyTorch 2.0 torch.compile()
+
+# Distributed training
+backend = 'nccl'        # DDP backend: 'nccl' (GPU), 'gloo' (CPU), 'mpi'
+```
+
+## Command-Line Override Syntax
+
+### Basic Types
+
+```bash
+# Integer
+python train.py --batch_size=32
+
+# Float
+python train.py --learning_rate=3e-4
+
+# Boolean
+python train.py --compile=False --wandb_log=True
+
+# String
+python train.py --dataset=shakespeare --out_dir=out-custom
+```
+
+### Type Safety
+
+The configurator enforces type matching:
+
+```python
+assert type(attempt) == type(globals()[key])
+```
+
+**This means:**
+- `--batch_size=32.5` → Error (batch_size is int)
+- `--learning_rate=0.001` → OK (learning_rate is float)
+- `--compile=true` → Error (must be `True` with capital T)
+
+<Warning>
+Boolean values must be exactly `True` or `False` (capital first letter). Python's `literal_eval` is case-sensitive.
+</Warning>
+
+### Multiple Overrides
+
+```bash
+python train.py config/train_gpt2.py \
+    --batch_size=8 \
+    --gradient_accumulation_steps=80 \
+    --learning_rate=3e-4 \
+    --max_iters=100000 \
+    --eval_interval=1000 \
+    --compile=False
+```
+
+## Common Configurations
+
+### Quick Debug Run
+
+```bash
+python train.py \
+    --dataset=shakespeare_char \
+    --max_iters=1000 \
+    --eval_interval=100 \
+    --batch_size=32 \
+    --compile=False
+```
+
+### CPU-Only Training (MacBook)
+
+```bash
+python train.py config/train_shakespeare_char.py \
+    --device=cpu \
+    --compile=False \
+    --eval_iters=20 \
+    --log_interval=1 \
+    --block_size=64 \
+    --batch_size=12 \
+    --n_layer=4 \
+    --n_head=4 \
+    --n_embd=128
+```
+
+### Apple Silicon (M1/M2)
+
+```bash
+python train.py config/train_shakespeare_char.py \
+    --device=mps \
+    --compile=False
+```
+
+### Small GPU (12GB VRAM)
+
+```bash
+python train.py config/train_gpt2.py \
+    --batch_size=4 \
+    --gradient_accumulation_steps=120 \
+    --n_layer=12 \
+    --n_head=12 \
+    --n_embd=768
+```
+
+### Resume Training
+
+```bash
+python train.py \
+    --init_from=resume \
+    --out_dir=out-shakespeare-char
+```
+
+### Fine-tune GPT-2
+
+```bash
+python train.py \
+    --init_from=gpt2-medium \
+    --dataset=shakespeare \
+    --learning_rate=3e-5 \
+    --decay_lr=False \
+    --max_iters=100 \
+    --eval_interval=10
+```
+
+## Creating Custom Config Files
+
+<Steps>
+  <Step title="Create config file">
+    Create a new `.py` file in the `config/` directory:
+    ```bash
+    touch config/my_experiment.py
+    ```
+  </Step>
+  
+  <Step title="Define overrides">
+    Set only the parameters you want to change:
+    ```python
+    # config/my_experiment.py
+    out_dir = 'out-my-experiment'
+    
+    # Model: smaller GPT
+    n_layer = 8
+    n_head = 8
+    n_embd = 512
+    
+    # Training: faster iteration
+    batch_size = 16
+    max_iters = 50000
+    eval_interval = 500
+    
+    # Logging
+    wandb_log = True
+    wandb_project = 'my-project'
+    wandb_run_name = 'experiment-1'
+    ```
+  </Step>
+  
+  <Step title="Run with config">
+    ```bash
+    python train.py config/my_experiment.py
+    ```
+  </Step>
+  
+  <Step title="Override at runtime (optional)">
+    ```bash
+    python train.py config/my_experiment.py --learning_rate=1e-3
+    ```
+  </Step>
+</Steps>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Version Control Configs" icon="code-branch">
+    Store config files in git to track experiment settings
+  </Card>
+  
+  <Card title="Use Descriptive Names" icon="tag">
+    Name configs by experiment: `config/gpt2_finetune_v2.py`
+  </Card>
+  
+  <Card title="Set out_dir Uniquely" icon="folder">
+    Avoid overwriting checkpoints: `out_dir = 'out-exp-name'`
+  </Card>
+  
+  <Card title="Document Experiments" icon="book">
+    Add comments explaining non-obvious hyperparameter choices
+  </Card>
+</CardGroup>
+
+## Debugging Configuration
+
+The configurator prints all overrides:
+
+```bash
+$ python train.py config/train_gpt2.py --batch_size=8
+
+Overriding config with config/train_gpt2.py:
+wandb_log = True
+wandb_project = 'owt'
+wandb_run_name='gpt2-124M'
+...
+
+Overriding: batch_size = 8
+```
+
+To see all final config values, check the logged `config` dict:
+
+```python
+# train.py:78
+config = {k: globals()[k] for k in config_keys}
+print(config)  # Add this for debugging
+```
+
+## Limitations
+
+<Warning>
+**Known Issues:**
+
+1. **Global scope pollution**: Config modifies `globals()` directly
+2. **No nested configs**: Can't have `model.n_layer`, only `n_layer`
+3. **Type strictness**: Can't change types (e.g., int → float)
+4. **No validation**: Invalid combinations won't error until training starts
+
+These trade-offs keep the code simple and hackable. For complex experiments, consider forking and adding your own config system.
+</Warning>
+
+## Alternative: Programmatic Configuration
+
+For advanced use cases, modify `train.py` directly:
+
+```python
+# train.py
+if __name__ == '__main__':
+    # Programmatically set configs
+    n_layer = 24
+    n_head = 16
+    learning_rate = 3e-4
+    
+    # Then run training
+    exec(open('configurator.py').read())
+    # ... rest of train.py
+```
+
+<Note>
+For production ML workflows, consider using dedicated config libraries like [Hydra](https://hydra.cc/) or [OmegaConf](https://omegaconf.readthedocs.io/). However, nanoGPT prioritizes simplicity and hackability over enterprise features.
+</Note>

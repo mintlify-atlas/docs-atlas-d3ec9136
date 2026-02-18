@@ -1,0 +1,482 @@
+---
+title: 'Multi-Node Distributed Training'
+description: 'Scale nanoGPT training across multiple GPU nodes with PyTorch DDP'
+icon: 'network-wired'
+---
+
+## Overview
+
+Multi-node distributed training allows you to scale GPT training across multiple machines, each with multiple GPUs. This is essential for training larger models faster or reducing training time for standard models.
+
+nanoGPT uses PyTorch's Distributed Data Parallel (DDP) for efficient multi-node training.
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Hardware Requirements" icon="server">
+    - Multiple GPU nodes (2+)
+    - 8 GPUs per node recommended
+    - High-speed interconnect (Infiniband preferred)
+    - Sufficient network bandwidth
+  </Card>
+  <Card title="Software Requirements" icon="code">
+    - PyTorch 1.12+ with distributed support
+    - NCCL backend for GPU communication
+    - Same nanoGPT version on all nodes
+    - Shared filesystem or synchronized code
+  </Card>
+</CardGroup>
+
+<Warning>
+All nodes must have:
+- Same PyTorch and CUDA versions
+- Access to the same training data (via shared filesystem or replication)
+- Network connectivity between nodes
+- Synchronized system clocks (NTP recommended)
+</Warning>
+
+## Basic Multi-Node Setup
+
+<Steps>
+  <Step title="Verify Network Connectivity">
+    Ensure all nodes can communicate. From the master node, ping worker nodes:
+
+    ```bash
+    ping worker-node-1
+    ping worker-node-2
+    ```
+
+    Check that all nodes are on the same network and can reach each other.
+  </Step>
+
+  <Step title="Benchmark Interconnect">
+    Test network bandwidth with `iperf3` to ensure sufficient speed:
+
+    ```bash
+    # On master node (IP: 123.456.123.456)
+    iperf3 -s
+
+    # On worker node
+    iperf3 -c 123.456.123.456
+    ```
+
+    <Note>
+    **Target bandwidth**:
+    - Infiniband: 100+ Gbps (ideal)
+    - 10GbE: 10 Gbps (acceptable)
+    - 1GbE: 1 Gbps (will bottleneck)
+    </Note>
+
+    <Warning>
+    Without Infiniband, training will likely be **significantly slower** due to network bottlenecks during gradient synchronization.
+    </Warning>
+  </Step>
+
+  <Step title="Launch Training on Master Node">
+    On the master node, launch training with the appropriate `torchrun` arguments:
+
+    ```bash
+    torchrun \
+      --nproc_per_node=8 \
+      --nnodes=2 \
+      --node_rank=0 \
+      --master_addr=123.456.123.456 \
+      --master_port=1234 \
+      train.py config/train_gpt2.py
+    ```
+
+    ### Parameter Breakdown
+
+    | Parameter | Value | Description |
+    |-----------|-------|-------------|
+    | `--nproc_per_node` | 8 | Number of GPUs per node |
+    | `--nnodes` | 2 | Total number of nodes |
+    | `--node_rank` | 0 | Rank of this node (master = 0) |
+    | `--master_addr` | `123.456.123.456` | IP address of master node |
+    | `--master_port` | `1234` | Port for communication |
+  </Step>
+
+  <Step title="Launch Training on Worker Nodes">
+    On each worker node, launch training with the same parameters except for `--node_rank`:
+
+    ```bash
+    # Worker node 1 (node_rank=1)
+    torchrun \
+      --nproc_per_node=8 \
+      --nnodes=2 \
+      --node_rank=1 \
+      --master_addr=123.456.123.456 \
+      --master_port=1234 \
+      train.py config/train_gpt2.py
+    ```
+
+    <Note>
+    Each worker node must have a unique `--node_rank` (1, 2, 3, ...).
+    </Note>
+  </Step>
+
+  <Step title="Monitor Training">
+    Training logs will appear on all nodes, but only the master node (rank 0) writes checkpoints and performs evaluations.
+
+    Monitor with:
+    - Console output on master node
+    - `nvidia-smi` on each node for GPU utilization
+    - Weights & Biases (if enabled) for training curves
+  </Step>
+</Steps>
+
+## Example Configurations
+
+<Tabs>
+  <Tab title="2 Nodes (16 GPUs)">
+    ### Master Node
+    ```bash
+    torchrun \
+      --nproc_per_node=8 \
+      --nnodes=2 \
+      --node_rank=0 \
+      --master_addr=192.168.1.10 \
+      --master_port=29500 \
+      train.py config/train_gpt2.py
+    ```
+
+    ### Worker Node
+    ```bash
+    torchrun \
+      --nproc_per_node=8 \
+      --nnodes=2 \
+      --node_rank=1 \
+      --master_addr=192.168.1.10 \
+      --master_port=29500 \
+      train.py config/train_gpt2.py
+    ```
+
+    **Training time**: GPT-2 124M on OpenWebText in ~**2 days**
+  </Tab>
+
+  <Tab title="4 Nodes (32 GPUs)">
+    ### Master Node
+    ```bash
+    torchrun \
+      --nproc_per_node=8 \
+      --nnodes=4 \
+      --node_rank=0 \
+      --master_addr=192.168.1.10 \
+      --master_port=29500 \
+      train.py config/train_gpt2.py
+    ```
+
+    ### Worker Nodes
+    ```bash
+    # Worker 1 (node_rank=1)
+    torchrun --nproc_per_node=8 --nnodes=4 --node_rank=1 \
+      --master_addr=192.168.1.10 --master_port=29500 \
+      train.py config/train_gpt2.py
+
+    # Worker 2 (node_rank=2)
+    torchrun --nproc_per_node=8 --nnodes=4 --node_rank=2 \
+      --master_addr=192.168.1.10 --master_port=29500 \
+      train.py config/train_gpt2.py
+
+    # Worker 3 (node_rank=3)
+    torchrun --nproc_per_node=8 --nnodes=4 --node_rank=3 \
+      --master_addr=192.168.1.10 --master_port=29500 \
+      train.py config/train_gpt2.py
+    ```
+
+    **Training time**: GPT-2 124M on OpenWebText in ~**1 day**
+  </Tab>
+
+  <Tab title="8 Nodes (64 GPUs)">
+    ### Master Node
+    ```bash
+    torchrun \
+      --nproc_per_node=8 \
+      --nnodes=8 \
+      --node_rank=0 \
+      --master_addr=192.168.1.10 \
+      --master_port=29500 \
+      train.py config/train_gpt2.py
+    ```
+
+    ### Worker Nodes
+    Launch on each worker with `--node_rank=1` through `--node_rank=7`.
+
+    **Training time**: GPT-2 124M on OpenWebText in ~**12 hours**
+  </Tab>
+</Tabs>
+
+## Network Configuration
+
+### Infiniband Setup
+
+Infiniband provides the best performance for multi-node training.
+
+<Steps>
+  <Step title="Verify Infiniband">
+    Check that Infiniband interfaces are up:
+
+    ```bash
+    ibstat
+    ```
+
+    Look for active ports with "State: Active" and "Physical state: LinkUp".
+  </Step>
+
+  <Step title="Use Infiniband IP Address">
+    Use the Infiniband IP address (usually `ib0` interface) for `--master_addr`:
+
+    ```bash
+    ip addr show ib0
+    ```
+  </Step>
+
+  <Step title="Optimize NCCL for Infiniband">
+    Set NCCL environment variables:
+
+    ```bash
+    export NCCL_IB_HCA=mlx5_0
+    export NCCL_IB_GID_INDEX=3
+    export NCCL_IB_TC=106
+    export NCCL_DEBUG=INFO
+    ```
+  </Step>
+</Steps>
+
+### Ethernet (No Infiniband)
+
+If you don't have Infiniband, you must disable it in NCCL:
+
+```bash
+export NCCL_IB_DISABLE=1
+```
+
+<Warning>
+**Performance Impact**: Without Infiniband, multi-node training will be **much slower** (potentially 2-5x) due to network bottlenecks during gradient synchronization.
+
+Your training will work, but expect it to **crawl**.
+</Warning>
+
+### NCCL Tuning
+
+Optimize NCCL communication:
+
+```bash
+# Disable Infiniband if not available
+export NCCL_IB_DISABLE=1
+
+# Use socket for communication
+export NCCL_SOCKET_IFNAME=eth0  # Or your network interface
+
+# Enable debugging (verbose output)
+export NCCL_DEBUG=INFO
+
+# Tune for your network
+export NCCL_BUFFSIZE=2097152
+export NCCL_P2P_LEVEL=NVL
+```
+
+## Shared Filesystem Requirements
+
+<Tabs>
+  <Tab title="NFS (Recommended)">
+    Mount a shared NFS volume on all nodes:
+
+    ```bash
+    # On all nodes
+    sudo mount master-node:/data /data
+    ```
+
+    **Benefits**:
+    - Single source of truth for data
+    - Checkpoints written once, accessible to all
+    - Easy synchronization
+
+    **Structure**:
+    ```
+    /data/
+    ├── openwebtext/
+    │   ├── train.bin
+    │   └── val.bin
+    └── checkpoints/
+        └── out/
+    ```
+  </Tab>
+
+  <Tab title="Local Data (Alternative)">
+    Replicate data to each node's local storage:
+
+    ```bash
+    # On each node
+    scp -r master-node:/data/openwebtext ./data/
+    ```
+
+    **Benefits**:
+    - Faster data loading (local SSD/NVMe)
+    - No network bottleneck for data I/O
+
+    **Drawbacks**:
+    - Must sync checkpoints manually
+    - More storage required
+    - Data updates must be replicated
+  </Tab>
+</Tabs>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Connection timeout errors">
+    Error: `RuntimeError: Connection timed out`
+
+    **Causes**:
+    - Firewall blocking communication
+    - Wrong master IP address
+    - Nodes on different networks
+    - Port already in use
+
+    **Solutions**:
+    1. Check firewall rules (allow TCP on master port)
+    2. Verify `--master_addr` is correct and reachable
+    3. Try a different `--master_port`
+    4. Ensure all nodes are on the same subnet
+    5. Test with `telnet master-ip master-port`
+  </Accordion>
+
+  <Accordion title="Training is very slow">
+    **Check**:
+    1. Network bandwidth with `iperf3`
+    2. GPU utilization on all nodes (`nvidia-smi`)
+    3. NCCL is using correct backend
+    4. Infiniband is active (or disabled if not available)
+
+    **Common issues**:
+    - Using 1GbE network (upgrade to 10GbE or Infiniband)
+    - `NCCL_IB_DISABLE=1` not set when no Infiniband
+    - Imbalanced workload across nodes
+    - Slow shared filesystem (use local data)
+  </Accordion>
+
+  <Accordion title="Rank mismatch errors">
+    Error: `RuntimeError: Rank mismatch`
+
+    **Causes**:
+    - Duplicate `--node_rank` values
+    - Wrong `--nnodes` count
+    - Nodes started out of order
+
+    **Solutions**:
+    1. Ensure each node has unique `--node_rank` (0, 1, 2, ...)
+    2. Verify `--nnodes` matches actual number of nodes
+    3. Start master node first, then workers
+  </Accordion>
+
+  <Accordion title="NCCL initialization failed">
+    Error: `NCCL error: unhandled system error`
+
+    **Solutions**:
+    1. Check NCCL version: `python -c "import torch; print(torch.cuda.nccl.version())"`
+    2. Ensure same CUDA version on all nodes
+    3. Set `NCCL_DEBUG=INFO` for detailed logs
+    4. Disable Infiniband if not available: `NCCL_IB_DISABLE=1`
+    5. Update PyTorch to latest version
+  </Accordion>
+
+  <Accordion title="Data not found on worker nodes">
+    Error: `FileNotFoundError: train.bin`
+
+    **Solutions**:
+    1. Use shared filesystem (NFS) mounted on all nodes
+    2. Or replicate data to each node's local storage
+    3. Verify paths are identical on all nodes
+    4. Check permissions (all nodes must have read access)
+  </Accordion>
+</AccordionGroup>
+
+## Performance Optimization
+
+<CardGroup cols={2}>
+  <Card title="Use Infiniband" icon="bolt">
+    Infiniband provides 100+ Gbps bandwidth for fast gradient sync
+  </Card>
+  <Card title="Local Data Storage" icon="hard-drive">
+    Store data on local NVMe/SSD to avoid network I/O bottlenecks
+  </Card>
+  <Card title="Increase Batch Size" icon="layer-group">
+    Scale batch size with number of GPUs for better efficiency
+  </Card>
+  <Card title="Monitor Network" icon="chart-line">
+    Use `iperf3` and `nvidia-smi` to monitor bottlenecks
+  </Card>
+</CardGroup>
+
+## Scaling Considerations
+
+### Linear Scaling
+
+**Ideal scaling**: 2x GPUs → 2x speedup
+
+**Reality**: 2x GPUs → ~1.7-1.9x speedup due to:
+- Communication overhead
+- Gradient synchronization
+- Network latency
+
+### Efficiency by Node Count
+
+| Nodes | GPUs | Speedup | Efficiency |
+|-------|------|---------|------------|
+| 1 | 8 | 1x | 100% |
+| 2 | 16 | 1.9x | 95% |
+| 4 | 32 | 3.6x | 90% |
+| 8 | 64 | 6.8x | 85% |
+
+<Note>
+Efficiency decreases with more nodes due to communication overhead. Optimize network and batch size for best results.
+</Note>
+
+## Advanced: SLURM Integration
+
+For HPC clusters using SLURM:
+
+```bash slurm-job.sh
+#!/bin/bash
+#SBATCH --job-name=nanogpt
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=8
+#SBATCH --gres=gpu:8
+#SBATCH --time=24:00:00
+
+# Get master node address
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
+export MASTER_PORT=29500
+
+# Launch training
+srun torchrun \
+  --nproc_per_node=8 \
+  --nnodes=$SLURM_NNODES \
+  --node_rank=$SLURM_NODEID \
+  --master_addr=$MASTER_ADDR \
+  --master_port=$MASTER_PORT \
+  train.py config/train_gpt2.py
+```
+
+Submit with:
+```bash
+sbatch slurm-job.sh
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Single GPU Training" icon="microchip" href="/examples/single-gpu">
+    Start with single GPU before scaling
+  </Card>
+  <Card title="GPT-2 Reproduction" icon="clone" href="/examples/gpt2-reproduction">
+    Full GPT-2 training guide
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/training/configuration">
+    Optimize training parameters
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/training/troubleshooting">
+    Common issues and solutions
+  </Card>
+</CardGroup>

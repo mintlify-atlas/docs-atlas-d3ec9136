@@ -1,0 +1,369 @@
+---
+title: 'GPT'
+description: 'Main GPT language model class implementing the transformer architecture'
+---
+
+## Overview
+
+The `GPT` class is the main neural network module that implements the complete GPT architecture. It combines token embeddings, positional embeddings, transformer blocks, and a language modeling head to create a generative language model.
+
+Defined in `model.py:118-330`.
+
+## Class Definition
+
+```python
+class GPT(nn.Module):
+    def __init__(self, config: GPTConfig)
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]
+    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, top_k: int = None) -> torch.Tensor
+    def configure_optimizers(self, weight_decay: float, learning_rate: float, betas: Tuple[float, float], device_type: str) -> torch.optim.AdamW
+    def estimate_mfu(self, fwdbwd_per_iter: int, dt: float) -> float
+    def crop_block_size(self, block_size: int) -> None
+    
+    @classmethod
+    def from_pretrained(cls, model_type: str, override_args: dict = None) -> GPT
+```
+
+## Architecture
+
+The GPT model consists of:
+
+```python
+self.transformer = nn.ModuleDict(dict(
+    wte = nn.Embedding(vocab_size, n_embd),      # Token embeddings
+    wpe = nn.Embedding(block_size, n_embd),      # Position embeddings
+    drop = nn.Dropout(dropout),                   # Embedding dropout
+    h = nn.ModuleList([Block(config) for ...]),  # Transformer blocks
+    ln_f = LayerNorm(n_embd, bias=bias),         # Final layer norm
+))
+self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)  # Output projection
+```
+
+## Constructor
+
+### `__init__(config: GPTConfig)`
+
+Initializes a GPT model from a configuration.
+
+<ParamField path="config" type="GPTConfig" required>
+  Configuration object specifying model hyperparameters. See [GPTConfig](/api/gpt-config) for details.
+</ParamField>
+
+**Behavior:**
+- Creates token and position embedding tables
+- Instantiates `n_layer` transformer blocks
+- Applies weight initialization (Normal(0, 0.02))
+- Applies special scaled initialization to residual projections (Normal(0, 0.02/sqrt(2*n_layer)))
+- Ties token embedding weights with output projection weights (weight tying)
+- Prints total parameter count
+
+<Expandable title="Weight Tying Explained (model.py:138)">
+  Weight tying shares parameters between the token embedding layer and the final output projection:
+  
+  ```python
+  self.transformer.wte.weight = self.lm_head.weight
+  ```
+  
+  **Benefits:**
+  - Reduces parameter count (saves vocab_size × n_embd parameters)
+  - Often improves performance since input and output representations are related
+  - Standard practice in modern language models
+  
+  **Reference:** [Papers With Code - Weight Tying](https://paperswithcode.com/method/weight-tying)
+</Expandable>
+
+```python
+from model import GPT, GPTConfig
+
+config = GPTConfig(n_layer=12, n_head=12, n_embd=768)
+model = GPT(config)
+# Output: number of parameters: 124.44M
+```
+
+## Core Methods
+
+### `forward(idx, targets=None)`
+
+Performs the forward pass through the model.
+
+<ParamField path="idx" type="torch.Tensor" required>
+  Input token indices of shape `(batch_size, sequence_length)`. Values must be in range `[0, vocab_size)`.
+</ParamField>
+
+<ParamField path="targets" type="torch.Tensor" default="None">
+  Target token indices for computing loss, same shape as `idx`. If provided, the model computes cross-entropy loss. Use `-1` for positions to ignore in loss calculation.
+</ParamField>
+
+**Returns:** `Tuple[torch.Tensor, Optional[torch.Tensor]]`
+- `logits`: Output logits
+  - If `targets` is None: shape `(batch_size, 1, vocab_size)` - only last position
+  - If `targets` provided: shape `(batch_size, sequence_length, vocab_size)` - all positions
+- `loss`: Cross-entropy loss (scalar tensor) if `targets` provided, else `None`
+
+**Process:**
+1. Compute token embeddings: `tok_emb = wte(idx)`
+2. Compute positional embeddings: `pos_emb = wpe(positions)`
+3. Add embeddings and apply dropout: `x = drop(tok_emb + pos_emb)`
+4. Pass through all transformer blocks sequentially
+5. Apply final layer normalization
+6. Project to vocabulary logits via `lm_head`
+7. Compute loss if targets provided
+
+```python
+import torch
+
+# Training mode (with targets)
+idx = torch.randint(0, 50304, (4, 64))      # (batch=4, seq_len=64)
+targets = torch.randint(0, 50304, (4, 64))  # Next token targets
+logits, loss = model(idx, targets)
+print(logits.shape)  # torch.Size([4, 64, 50304])
+print(loss.item())   # e.g., 10.234
+
+# Inference mode (no targets)
+logits, loss = model(idx)
+print(logits.shape)  # torch.Size([4, 1, 50304]) - only last position
+print(loss)          # None
+```
+
+### `generate(idx, max_new_tokens, temperature=1.0, top_k=None)`
+
+Autoregressive generation method. Generates new tokens by sampling from the model's predictions.
+
+<ParamField path="idx" type="torch.Tensor" required>
+  Conditioning sequence of shape `(batch_size, sequence_length)`. The model continues from this prompt.
+</ParamField>
+
+<ParamField path="max_new_tokens" type="int" required>
+  Number of new tokens to generate.
+</ParamField>
+
+<ParamField path="temperature" type="float" default={1.0}>
+  Sampling temperature. Controls randomness:
+  - `< 1.0`: More conservative, peaked distribution (less random)
+  - `= 1.0`: Use raw model probabilities
+  - `> 1.0`: More diverse, flattened distribution (more random)
+</ParamField>
+
+<ParamField path="top_k" type="int" default="None">
+  If specified, only sample from the top-k most likely tokens. Reduces sampling to the k highest probability options.
+</ParamField>
+
+**Returns:** `torch.Tensor` of shape `(batch_size, sequence_length + max_new_tokens)`
+
+**Note:** Use `model.eval()` and `torch.no_grad()` for generation.
+
+```python
+import torch
+
+model.eval()
+
+# Start with a prompt (e.g., tokenized "Hello")
+prompt = torch.tensor([[15496]], dtype=torch.long)  # shape (1, 1)
+
+# Generate with different sampling strategies
+with torch.no_grad():
+    # Greedy (low temperature)
+    output = model.generate(prompt, max_new_tokens=50, temperature=0.7)
+    
+    # Diverse (high temperature)
+    output = model.generate(prompt, max_new_tokens=50, temperature=1.5)
+    
+    # Top-k sampling
+    output = model.generate(prompt, max_new_tokens=50, temperature=1.0, top_k=40)
+
+print(output.shape)  # torch.Size([1, 51])
+```
+
+### `from_pretrained(model_type, override_args=None)` (classmethod)
+
+Loads pretrained GPT-2 weights from HuggingFace.
+
+<ParamField path="model_type" type="str" required>
+  Pretrained model size. Options:
+  - `'gpt2'`: 124M parameters
+  - `'gpt2-medium'`: 350M parameters
+  - `'gpt2-large'`: 774M parameters
+  - `'gpt2-xl'`: 1558M parameters
+</ParamField>
+
+<ParamField path="override_args" type="dict" default="None">
+  Optional dictionary to override config values. Currently only `'dropout'` can be overridden.
+</ParamField>
+
+**Returns:** `GPT` model with pretrained weights loaded
+
+**Process:**
+1. Determines config from model_type
+2. Downloads weights from HuggingFace transformers
+3. Transposes Conv1D weights to Linear format
+4. Copies all parameters to nanoGPT model
+5. Returns initialized model
+
+```python
+from model import GPT
+
+# Load pretrained GPT-2
+model = GPT.from_pretrained('gpt2')
+
+# Load with custom dropout
+model = GPT.from_pretrained('gpt2', override_args={'dropout': 0.1})
+
+# Load larger model
+model = GPT.from_pretrained('gpt2-medium')
+```
+
+### `configure_optimizers(weight_decay, learning_rate, betas, device_type)`
+
+Creates an AdamW optimizer with proper weight decay configuration.
+
+<ParamField path="weight_decay" type="float" required>
+  Weight decay coefficient (L2 regularization). Typically 0.1.
+</ParamField>
+
+<ParamField path="learning_rate" type="float" required>
+  Learning rate for optimization. Typically 6e-4 for GPT-2 small.
+</ParamField>
+
+<ParamField path="betas" type="Tuple[float, float]" required>
+  Adam beta coefficients (β1, β2). Typically `(0.9, 0.95)` or `(0.9, 0.999)`.
+</ParamField>
+
+<ParamField path="device_type" type="str" required>
+  Device type: `'cuda'` or `'cpu'`. If CUDA, uses fused AdamW for better performance.
+</ParamField>
+
+**Returns:** `torch.optim.AdamW` optimizer
+
+**Behavior:**
+- 2D parameters (weights, embeddings) → weight decay applied
+- 1D parameters (biases, layernorm) → no weight decay
+- Uses fused AdamW kernel on CUDA for speed
+
+```python
+optimizer = model.configure_optimizers(
+    weight_decay=0.1,
+    learning_rate=6e-4,
+    betas=(0.9, 0.95),
+    device_type='cuda'
+)
+
+# Training loop
+for batch in dataloader:
+    logits, loss = model(batch['input'], batch['target'])
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+```
+
+### `estimate_mfu(fwdbwd_per_iter, dt)`
+
+Estimates Model FLOPs Utilization (MFU) - the efficiency of hardware usage.
+
+<ParamField path="fwdbwd_per_iter" type="int" required>
+  Number of forward-backward passes per iteration (gradient accumulation steps).
+</ParamField>
+
+<ParamField path="dt" type="float" required>
+  Time elapsed for the iteration in seconds.
+</ParamField>
+
+**Returns:** `float` - MFU ratio (0.0 to 1.0)
+
+**Computation:** Based on PaLM paper (Appendix B), estimates FLOPs and compares to A100 bfloat16 peak (312 TFLOPS).
+
+```python
+import time
+
+t0 = time.time()
+for _ in range(gradient_accumulation_steps):
+    logits, loss = model(batch['input'], batch['target'])
+    loss.backward()
+t1 = time.time()
+
+mfu = model.estimate_mfu(
+    fwdbwd_per_iter=gradient_accumulation_steps,
+    dt=t1 - t0
+)
+print(f"MFU: {mfu*100:.2f}%")  # e.g., "MFU: 37.21%"
+```
+
+### `crop_block_size(block_size)`
+
+Reduces the model's maximum sequence length (model surgery).
+
+<ParamField path="block_size" type="int" required>
+  New block size (must be ≤ current block_size).
+</ParamField>
+
+**Use case:** Shrink a pretrained model's context window to reduce memory usage.
+
+```python
+# Load GPT-2 with block_size=1024
+model = GPT.from_pretrained('gpt2')
+
+# Reduce to 256 for faster training
+model.crop_block_size(256)
+print(model.config.block_size)  # 256
+```
+
+## Helper Methods
+
+### `get_num_params(non_embedding=True)`
+
+Returns total parameter count.
+
+<ParamField path="non_embedding" type="bool" default={true}>
+  If True, excludes positional embeddings (since they're not trained in the same way). Token embeddings are included due to weight tying.
+</ParamField>
+
+```python
+total_params = model.get_num_params()
+print(f"{total_params / 1e6:.2f}M parameters")
+```
+
+## Complete Training Example
+
+```python
+import torch
+from model import GPT, GPTConfig
+
+# 1. Create model
+config = GPTConfig()
+model = GPT(config).cuda()
+
+# 2. Setup optimizer
+optimizer = model.configure_optimizers(
+    weight_decay=0.1,
+    learning_rate=6e-4,
+    betas=(0.9, 0.95),
+    device_type='cuda'
+)
+
+# 3. Training loop
+model.train()
+for batch in dataloader:
+    inputs = batch['input'].cuda()
+    targets = batch['target'].cuda()
+    
+    # Forward
+    logits, loss = model(inputs, targets)
+    
+    # Backward
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+    
+    print(f"Loss: {loss.item():.4f}")
+
+# 4. Generation
+model.eval()
+with torch.no_grad():
+    prompt = torch.tensor([[1, 2, 3]], device='cuda')
+    output = model.generate(prompt, max_new_tokens=100, temperature=0.8, top_k=40)
+```
+
+## Related Components
+
+- [GPTConfig](/api/gpt-config) - Model configuration
+- [Block](/api/blocks) - Transformer block used in `self.transformer.h`
+- [CausalSelfAttention](/api/attention) - Attention mechanism within blocks

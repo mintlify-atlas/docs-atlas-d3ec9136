@@ -1,0 +1,267 @@
+---
+title: 'Shakespeare Character-Level Training'
+description: 'Complete walkthrough of training a character-level GPT on Shakespeare'
+icon: 'masks-theater'
+---
+
+## Overview
+
+This example demonstrates the fastest way to get started with nanoGPT by training a character-level model on the complete works of Shakespeare. This is perfect for beginners who want to feel the magic of training a GPT model.
+
+<Note>
+This example uses character-level tokenization (not BPE), making it simple and fast to train. The entire dataset is only 1MB.
+</Note>
+
+## Prerequisites
+
+Make sure you have nanoGPT installed with all dependencies:
+
+```bash
+pip install torch numpy transformers datasets tiktoken wandb tqdm
+```
+
+## Training Walkthrough
+
+<Steps>
+  <Step title="Prepare the Dataset">
+    First, download and prepare the Shakespeare dataset. This creates tokenized binary files:
+
+    ```bash
+    python data/shakespeare_char/prepare.py
+    ```
+
+    This command:
+    - Downloads the complete works of Shakespeare (~1MB text file)
+    - Converts the text into a stream of character integers
+    - Creates `train.bin` and `val.bin` in the `data/shakespeare_char/` directory
+  </Step>
+
+  <Step title="Choose Your Training Configuration">
+    The training configuration depends on your hardware. nanoGPT provides different setups for GPU and CPU training.
+
+    <Tabs>
+      <Tab title="GPU Training">
+        If you have a GPU (NVIDIA recommended), you can train a small GPT with optimal settings.
+
+        ### Configuration Details
+
+        The `config/train_shakespeare_char.py` file contains:
+
+        ```python config/train_shakespeare_char.py
+        out_dir = 'out-shakespeare-char'
+        eval_interval = 250
+        eval_iters = 200
+        log_interval = 10
+
+        always_save_checkpoint = False
+
+        wandb_log = False
+        wandb_project = 'shakespeare-char'
+        wandb_run_name = 'mini-gpt'
+
+        dataset = 'shakespeare_char'
+        gradient_accumulation_steps = 1
+        batch_size = 64
+        block_size = 256  # context of up to 256 previous characters
+
+        # baby GPT model :)
+        n_layer = 6
+        n_head = 6
+        n_embd = 384
+        dropout = 0.2
+
+        learning_rate = 1e-3
+        max_iters = 5000
+        lr_decay_iters = 5000
+        min_lr = 1e-4
+        beta2 = 0.99
+
+        warmup_iters = 100
+        ```
+
+        ### Model Architecture
+        - **6 layers** with **6 attention heads** each
+        - **384** embedding dimensions
+        - Context size: **256 characters**
+        - Total parameters: ~10M (a "baby GPT")
+
+        ### Training Command
+
+        ```bash
+        python train.py config/train_shakespeare_char.py
+        ```
+
+        <Tip>
+        On an A100 GPU, this training run takes about **3 minutes** and achieves a validation loss of ~**1.47**.
+        </Tip>
+      </Tab>
+
+      <Tab title="CPU / MacBook">
+        If you only have a CPU or MacBook, you can still train a GPT by using a smaller model and fewer iterations.
+
+        ### Optimized CPU Command
+
+        ```bash
+        python train.py config/train_shakespeare_char.py \
+          --device=cpu \
+          --compile=False \
+          --eval_iters=20 \
+          --log_interval=1 \
+          --block_size=64 \
+          --batch_size=12 \
+          --n_layer=4 \
+          --n_head=4 \
+          --n_embd=128 \
+          --max_iters=2000 \
+          --lr_decay_iters=2000 \
+          --dropout=0.0
+        ```
+
+        ### Configuration Adjustments
+
+        | Parameter | GPU Value | CPU Value | Reason |
+        |-----------|-----------|-----------|--------|
+        | `device` | `cuda` | `cpu` | Use CPU instead of GPU |
+        | `compile` | `True` | `False` | Disable PyTorch 2.0 compile |
+        | `eval_iters` | 200 | 20 | Faster but noisier evaluation |
+        | `block_size` | 256 | 64 | Smaller context window |
+        | `batch_size` | 64 | 12 | Fewer examples per iteration |
+        | `n_layer` | 6 | 4 | Smaller model |
+        | `n_head` | 6 | 4 | Fewer attention heads |
+        | `n_embd` | 384 | 128 | Smaller embedding size |
+        | `max_iters` | 5000 | 2000 | Shorter training |
+        | `dropout` | 0.2 | 0.0 | Less regularization for small model |
+
+        <Note>
+        This configuration runs in about **3 minutes** on a CPU and achieves a validation loss of ~**1.88**. The samples are slightly worse but still impressive!
+        </Note>
+
+        ### Apple Silicon (M1/M2/M3)
+
+        If you have a MacBook with Apple Silicon, add `--device=mps` to use the Metal Performance Shaders GPU:
+
+        ```bash
+        python train.py config/train_shakespeare_char.py \
+          --device=mps \
+          --eval_iters=20 \
+          --block_size=64 \
+          --batch_size=12 \
+          --n_layer=4 \
+          --n_head=4 \
+          --n_embd=128 \
+          --max_iters=2000 \
+          --lr_decay_iters=2000 \
+          --dropout=0.0
+        ```
+
+        <Tip>
+        Using MPS can provide **2-3x speedup** over CPU and allows larger models.
+        </Tip>
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Generate Samples">
+    After training completes, the best model checkpoint is saved to the output directory (`out-shakespeare-char` by default).
+
+    ### Sampling Command
+
+    ```bash
+    python sample.py --out_dir=out-shakespeare-char
+    ```
+
+    For CPU or MPS, specify the device:
+
+    ```bash
+    python sample.py --out_dir=out-shakespeare-char --device=cpu
+    ```
+
+    ### Sample Outputs
+
+    <Tabs>
+      <Tab title="GPU Training Output">
+        After 3 minutes of training on a GPU (validation loss ~1.47):
+
+        ```text
+        ANGELO:
+        And cowards it be strawn to my bed,
+        And thrust the gates of my threats,
+        Because he that ale away, and hang'd
+        An one with him.
+
+        DUKE VINCENTIO:
+        I thank your eyes against it.
+
+        DUKE VINCENTIO:
+        Then will answer him to save the malm:
+        And what have you tyrannous shall do this?
+
+        DUKE VINCENTIO:
+        If you have done evils of all disposition
+        To end his power, the day of thrust for a common men
+        That I leave, to fight with over-liking
+        Hasting in a roseman.
+        ```
+
+        <Tip>
+        Not bad for a character-level model after just 3 minutes! The model captures:
+        - Character names and dialogue format
+        - Shakespearean vocabulary and style
+        - Grammatical structure
+        </Tip>
+      </Tab>
+
+      <Tab title="CPU Training Output">
+        After 3 minutes of training on a CPU (validation loss ~1.88):
+
+        ```text
+        GLEORKEN VINGHARD III:
+        Whell's the couse, the came light gacks,
+        And the for mought you in Aut fries the not high shee
+        bot thou the sought bechive in that to doth groan you,
+        No relving thee post mose the wear
+        ```
+
+        <Note>
+        The CPU output is slightly less coherent due to the smaller model and shorter training, but still captures the character gestalt of Shakespeare.
+        </Note>
+      </Tab>
+    </Tabs>
+  </Step>
+</Steps>
+
+## Improving Results
+
+For better quality outputs, consider:
+
+<CardGroup cols={2}>
+  <Card title="Longer Training" icon="clock">
+    Increase `--max_iters` to train longer (e.g., 10000 iterations)
+  </Card>
+  <Card title="Larger Model" icon="maximize">
+    Increase model size with more layers, heads, and embedding dimensions
+  </Card>
+  <Card title="Larger Context" icon="text-width">
+    Increase `--block_size` to give the model more context
+  </Card>
+  <Card title="Fine-tune GPT-2" icon="wand-magic-sparkles">
+    Use a pre-trained GPT-2 model instead of training from scratch (see [Finetuning](/training/finetuning))
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="GPT-2 Reproduction" icon="repeat" href="/examples/gpt2-reproduction">
+    Learn how to reproduce GPT-2 results on OpenWebText
+  </Card>
+  <Card title="Single GPU Training" icon="microchip" href="/examples/single-gpu">
+    Optimize training for a single GPU setup
+  </Card>
+  <Card title="Sampling" icon="dice" href="/training/sampling">
+    Learn more about sampling and inference options
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/training/configuration">
+    Deep dive into training configuration options
+  </Card>
+</CardGroup>

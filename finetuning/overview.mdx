@@ -1,0 +1,111 @@
+---
+title: 'Finetuning Overview'
+description: 'Learn how to finetune pretrained GPT-2 models on custom datasets with nanoGPT'
+icon: 'wand-magic-sparkles'
+---
+
+## What is Finetuning?
+
+Finetuning is the process of taking a pretrained model and continuing its training on a new, specific dataset. Unlike training from scratch, finetuning leverages the knowledge already learned by the pretrained model, resulting in:
+
+- **Faster training** - Requires only minutes instead of days
+- **Better performance** - Benefits from pretrained weights on large datasets
+- **Less data required** - Can achieve good results with smaller datasets
+- **Lower computational cost** - Can be done on a single GPU
+
+## Finetuning vs Training from Scratch
+
+<CardGroup cols={2}>
+  <Card title="Training from Scratch" icon="seedling">
+    - Start with random weights
+    - Requires large datasets (millions of tokens)
+    - Takes days on multiple GPUs
+    - Higher learning rates (6e-4)
+    - Best for domain-specific architectures
+  </Card>
+  <Card title="Finetuning" icon="bolt">
+    - Start with pretrained weights
+    - Works with smaller datasets (thousands of tokens)
+    - Takes minutes on single GPU
+    - Lower learning rates (3e-5)
+    - Best for adapting to new domains
+  </Card>
+</CardGroup>
+
+## How nanoGPT Makes Finetuning Easy
+
+nanoGPT simplifies finetuning with the `init_from` parameter. Simply specify which pretrained model to start from:
+
+```python
+# In your config file
+init_from = 'gpt2'  # Start from pretrained GPT-2
+```
+
+That's it! The training script will automatically:
+1. Download the OpenAI GPT-2 checkpoint
+2. Load the pretrained weights
+3. Continue training on your dataset
+
+## Available Pretrained Models
+
+nanoGPT supports all four OpenAI GPT-2 model sizes:
+
+| Model | Parameters | Layers | Heads | Embedding Size | Use Case |
+|-------|------------|--------|-------|----------------|----------|
+| `gpt2` | 124M | 12 | 12 | 768 | Best for quick experiments, limited compute |
+| `gpt2-medium` | 350M | 24 | 16 | 1024 | Balanced performance and speed |
+| `gpt2-large` | 774M | 36 | 20 | 1280 | Higher quality, more compute |
+| `gpt2-xl` | 1558M | 48 | 25 | 1600 | Best quality, requires significant GPU memory |
+
+<Note>
+  The larger the model, the better the results, but also the more GPU memory required. Start with `gpt2` for experimentation, then scale up to `gpt2-xl` for production.
+</Note>
+
+## Use Cases for Finetuning
+
+Finetuning pretrained GPT-2 models is ideal for:
+
+- **Style transfer** - Adapt to specific writing styles (Shakespeare, technical docs, etc.)
+- **Domain adaptation** - Specialize in medical, legal, or scientific text
+- **Few-shot learning** - Learn from limited training data
+- **Quick prototyping** - Test ideas without lengthy training
+- **Personal assistants** - Customize responses to specific use cases
+
+## Key Differences in Finetuning
+
+When finetuning vs training from scratch, you'll need to adjust:
+
+1. **Learning Rate** - Use much smaller rates (3e-5 vs 6e-4)
+2. **Training Duration** - Shorter training (20-100 iterations vs 5000+)
+3. **Checkpoint Saving** - Only save when validation improves
+4. **Learning Rate Decay** - Often disabled for finetuning
+
+<Tip>
+  Start with the configuration in `config/finetune_shakespeare.py` as a template for your own finetuning tasks.
+</Tip>
+
+## Quick Example
+
+Here's a minimal example of finetuning GPT-2 on Shakespeare:
+
+```bash
+# Prepare your data
+python data/shakespeare/prepare.py
+
+# Finetune the model
+python train.py config/finetune_shakespeare.py
+
+# Generate samples
+python sample.py --out_dir=out-shakespeare
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Using Pretrained Models" icon="download" href="/finetuning/pretrained-models">
+    Learn how to load and use GPT-2 checkpoints
+  </Card>
+  <Card title="Custom Datasets" icon="database" href="/finetuning/custom-datasets">
+    Finetune on your own data with practical examples
+  </Card>
+</CardGroup>
