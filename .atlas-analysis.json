@@ -1,10 +1,10 @@
 {
   "projectType": "ai-ml",
   "projectName": "nanoGPT",
-  "projectDescription": "The simplest, fastest repository for training and finetuning medium-sized GPT models",
+  "projectDescription": "The simplest, fastest repository for training/finetuning medium-sized GPTs.",
   "theme": "aspen",
-  "primaryColor": "#10b981",
-  "lightColor": "#34d399",
+  "primaryColor": "#10B981",
+  "lightColor": "#34D399",
   "darkColor": "#059669",
   "navigation": {
     "tabs": [
@@ -12,41 +12,37 @@
         "tab": "Documentation",
         "groups": [
           {
-            "group": "Get Started",
-            "pages": ["introduction", "installation", "quickstart"]
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
           },
           {
             "group": "Training",
             "pages": [
               "training/overview",
-              "training/shakespeare",
-              "training/gpt2-reproduction",
-              "training/finetuning",
-              "training/distributed"
+              "training/from-scratch",
+              "training/distributed",
+              "training/configuration"
             ]
           },
           {
-            "group": "Model",
+            "group": "Finetuning",
             "pages": [
-              "model/architecture",
-              "model/configuration",
-              "model/inference"
+              "finetuning/overview",
+              "finetuning/pretrained-models",
+              "finetuning/custom-datasets"
             ]
           },
           {
-            "group": "Data",
+            "group": "Guides",
             "pages": [
-              "data/preparation",
-              "data/datasets",
-              "data/tokenization"
-            ]
-          },
-          {
-            "group": "Advanced",
-            "pages": [
-              "advanced/performance",
-              "advanced/scaling-laws",
-              "advanced/hyperparameters"
+              "guides/data-preparation",
+              "guides/sampling",
+              "guides/benchmarking",
+              "guides/optimization"
             ]
           }
         ]
@@ -55,20 +51,35 @@
         "tab": "API Reference",
         "groups": [
           {
-            "group": "Core",
+            "group": "Core Modules",
             "pages": [
-              "api/gpt",
-              "api/gpt-config",
+              "api/model",
               "api/training",
-              "api/sampling"
+              "api/sampling",
+              "api/configuration"
             ]
           },
           {
-            "group": "Components",
+            "group": "Model Architecture",
             "pages": [
+              "api/gpt-config",
+              "api/gpt-model",
               "api/attention",
-              "api/mlp",
-              "api/block"
+              "api/blocks"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Examples",
+        "groups": [
+          {
+            "group": "Use Cases",
+            "pages": [
+              "examples/shakespeare",
+              "examples/gpt2-reproduction",
+              "examples/single-gpu",
+              "examples/multi-node"
             ]
           }
         ]
@@ -76,24 +87,28 @@
     ]
   },
   "keyFeatures": [
-    "Train GPT-2 from scratch on custom datasets",
-    "Finetune pretrained GPT-2 models (124M to 1.5B parameters)",
-    "Simple, readable codebase (~600 lines total)",
+    "Train GPT-2 124M in ~4 days on 8xA100",
+    "Simple codebase: ~300 lines for training, ~300 lines for model",
+    "Character-level and BPE tokenization support",
     "Distributed training with PyTorch DDP",
-    "Flash Attention support for efficiency",
-    "PyTorch 2.0 compile for speedup",
-    "Character-level and BPE tokenization",
-    "Sampling and inference utilities"
+    "Load and finetune OpenAI GPT-2 checkpoints",
+    "PyTorch 2.0 compile support for speed",
+    "Flash Attention for efficient training",
+    "Flexible configuration system"
   ],
   "publicApiSurface": [
     "GPT",
     "GPTConfig",
     "CausalSelfAttention",
-    "MLP",
     "Block",
     "LayerNorm",
+    "MLP",
+    "GPT.from_pretrained()",
+    "GPT.generate()",
+    "GPT.configure_optimizers()",
+    "GPT.estimate_mfu()",
     "train.py",
     "sample.py",
-    "configurator.py"
+    "bench.py"
   ]
 }
