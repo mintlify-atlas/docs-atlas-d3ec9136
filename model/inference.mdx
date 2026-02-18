@@ -1,0 +1,422 @@
+---
+title: 'Inference & Sampling'
+description: 'Text generation and autoregressive sampling'
+---
+
+## Overview
+
+The GPT model supports autoregressive text generation through the `generate()` method. This page covers sampling strategies, temperature control, and practical usage for text generation.
+
+## Basic Generation
+
+The core generation method performs autoregressive sampling:
+
+```python
+@torch.no_grad()
+def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    """
+    Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+    the sequence max_new_tokens times, feeding the predictions back into the model each time.
+    Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+    """
+    for _ in range(max_new_tokens):
+        # if the sequence context is growing too long we must crop it at block_size
+        idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+        # forward the model to get the logits for the index in the sequence
+        logits, _ = self(idx_cond)
+        # pluck the logits at the final step and scale by desired temperature
+        logits = logits[:, -1, :] / temperature
+        # optionally crop the logits to only the top k options
+        if top_k is not None:
+            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            logits[logits < v[:, [-1]]] = -float('Inf')
+        # apply softmax to convert logits to (normalized) probabilities
+        probs = F.softmax(logits, dim=-1)
+        # sample from the distribution
+        idx_next = torch.multinomial(probs, num_samples=1)
+        # append sampled index to the running sequence and continue
+        idx = torch.cat((idx, idx_next), dim=1)
+
+    return idx
+```
+
+## Quick Start
+
+```python
+import torch
+from model import GPT
+
+# Load pretrained model
+model = GPT.from_pretrained('gpt2')
+model.eval()
+model.to('cuda')
+
+# Prepare input ("Hello, my name is")
+import tiktoken
+enc = tiktoken.get_encoding('gpt2')
+start_ids = enc.encode("Hello, my name is")
+x = torch.tensor(start_ids, dtype=torch.long, device='cuda')[None, ...]
+
+# Generate
+with torch.no_grad():
+    y = model.generate(x, max_new_tokens=50, temperature=0.8, top_k=200)
+    
+# Decode
+print(enc.decode(y[0].tolist()))
+```
+
+## Sampling Parameters
+
+### max_new_tokens
+
+<ParamField path="max_new_tokens" type="int" required>
+  Number of new tokens to generate. The model will perform this many autoregressive steps.
+</ParamField>
+
+```python
+# Generate 100 new tokens
+y = model.generate(x, max_new_tokens=100)
+
+# Generate 500 tokens for longer text
+y = model.generate(x, max_new_tokens=500)
+```
+
+**Considerations:**
+- Longer generation takes more time (linear in `max_new_tokens`)
+- Context window is limited by `block_size`
+- Each step requires a forward pass through the model
+
+### temperature
+
+<ParamField path="temperature" type="float" default="1.0">
+  Controls randomness in sampling. Lower values make the model more confident and deterministic, higher values increase diversity and randomness.
+</ParamField>
+
+**How it works:**
+- Temperature scales the logits before applying softmax: `logits / temperature`
+- `temperature = 1.0`: No change (standard sampling)
+- `temperature < 1.0`: Sharper distribution (more confident)
+- `temperature > 1.0`: Flatter distribution (more random)
+
+<Tabs>
+  <Tab title="Low (0.5)">
+    ```python
+    # More deterministic and focused
+    y = model.generate(x, max_new_tokens=100, temperature=0.5)
+    ```
+    
+    **Effect:** More conservative, repetitive, grammatically correct
+    
+    **Use case:** Factual text, code generation, formal writing
+  </Tab>
+  
+  <Tab title="Medium (0.8)">
+    ```python
+    # Balanced creativity and coherence
+    y = model.generate(x, max_new_tokens=100, temperature=0.8)
+    ```
+    
+    **Effect:** Good balance of diversity and quality
+    
+    **Use case:** General text generation, chatbots, stories
+  </Tab>
+  
+  <Tab title="Standard (1.0)">
+    ```python
+    # Default sampling
+    y = model.generate(x, max_new_tokens=100, temperature=1.0)
+    ```
+    
+    **Effect:** Samples directly from model's distribution
+    
+    **Use case:** Baseline, evaluations
+  </Tab>
+  
+  <Tab title="High (1.5)">
+    ```python
+    # More random and creative
+    y = model.generate(x, max_new_tokens=100, temperature=1.5)
+    ```
+    
+    **Effect:** Very diverse, potentially incoherent
+    
+    **Use case:** Creative writing, brainstorming
+  </Tab>
+</Tabs>
+
+<Note>
+Temperature approaching 0 makes sampling nearly deterministic (greedy), while very high values produce increasingly random outputs.
+</Note>
+
+### top_k
+
+<ParamField path="top_k" type="int" optional>
+  Restrict sampling to the top k most likely tokens. Setting this filters out low-probability tokens and can improve quality.
+</ParamField>
+
+**How it works:**
+1. Find the k tokens with highest probability
+2. Set all other tokens to `-inf` (zero probability)
+3. Renormalize and sample from the filtered distribution
+
+```python
+# No filtering (sample from full vocabulary)
+y = model.generate(x, max_new_tokens=100, top_k=None)
+
+# Only consider top 50 tokens at each step
+y = model.generate(x, max_new_tokens=100, top_k=50)
+
+# Common setting: top 200 tokens
+y = model.generate(x, max_new_tokens=100, top_k=200)
+```
+
+**Common values:**
+- `None`: No filtering (full vocabulary)
+- `50`: Very restrictive, safe outputs
+- `200`: Balanced quality and diversity
+- `500`: More diverse outputs
+
+<Info>
+Top-k sampling is especially useful with higher temperatures, as it prevents sampling extremely unlikely tokens that might be boosted by temperature scaling.
+</Info>
+
+## Complete Sampling Example
+
+Here's the reference implementation from `sample.py`:
+
+```python
+import os
+import pickle
+from contextlib import nullcontext
+import torch
+import tiktoken
+from model import GPTConfig, GPT
+
+# Configuration
+init_from = 'gpt2'  # or 'resume' to load from checkpoint
+start = "\n"  # starting prompt
+num_samples = 10  # number of samples to draw
+max_new_tokens = 500
+temperature = 0.8
+top_k = 200
+seed = 1337
+device = 'cuda'
+dtype = 'bfloat16'  # 'float32', 'bfloat16', or 'float16'
+
+# Set random seed
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+
+# Setup device and dtype
+device_type = 'cuda' if 'cuda' in device else 'cpu'
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+
+# Load model
+if init_from == 'resume':
+    # Load from checkpoint
+    ckpt_path = os.path.join('out', 'ckpt.pt')
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    gptconf = GPTConfig(**checkpoint['model_args'])
+    model = GPT(gptconf)
+    state_dict = checkpoint['model']
+    # Remove '_orig_mod.' prefix from compiled models
+    unwanted_prefix = '_orig_mod.'
+    for k,v in list(state_dict.items()):
+        if k.startswith(unwanted_prefix):
+            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+    model.load_state_dict(state_dict)
+elif init_from.startswith('gpt2'):
+    # Load pretrained GPT-2
+    model = GPT.from_pretrained(init_from, dict(dropout=0.0))
+
+model.eval()
+model.to(device)
+
+# Setup tokenizer
+enc = tiktoken.get_encoding("gpt2")
+encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
+decode = lambda l: enc.decode(l)
+
+# Encode the prompt
+start_ids = encode(start)
+x = torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...]
+
+# Generate samples
+with torch.no_grad():
+    with ctx:
+        for k in range(num_samples):
+            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+            print(decode(y[0].tolist()))
+            print('---------------')
+```
+
+## Advanced Usage
+
+### Batch Generation
+
+Generate multiple sequences in parallel:
+
+```python
+# Create batch of prompts
+prompts = [
+    "Once upon a time",
+    "In a galaxy far away",
+    "The future of AI"
+]
+
+# Encode all prompts
+encoded = [enc.encode(p) for p in prompts]
+
+# Pad to same length
+max_len = max(len(e) for e in encoded)
+padded = [e + [enc.eot_token] * (max_len - len(e)) for e in encoded]
+x = torch.tensor(padded, dtype=torch.long, device='cuda')
+
+# Generate for all prompts
+with torch.no_grad():
+    y = model.generate(x, max_new_tokens=100, temperature=0.8, top_k=200)
+
+# Decode results
+for i, seq in enumerate(y):
+    print(f"Prompt {i}: {decode(seq.tolist())}")
+```
+
+### Loading from Custom Checkpoint
+
+```python
+import torch
+from model import GPT, GPTConfig
+
+# Load checkpoint
+ckpt_path = 'out/ckpt.pt'
+checkpoint = torch.load(ckpt_path, map_location='cuda')
+
+# Create model from saved config
+config = GPTConfig(**checkpoint['model_args'])
+model = GPT(config)
+
+# Load weights
+state_dict = checkpoint['model']
+model.load_state_dict(state_dict)
+
+model.eval()
+model.to('cuda')
+
+# Generate
+x = torch.tensor(enc.encode("Hello"), dtype=torch.long, device='cuda')[None, ...]
+y = model.generate(x, max_new_tokens=100)
+```
+
+### Using torch.compile()
+
+```python
+import torch
+from model import GPT
+
+model = GPT.from_pretrained('gpt2')
+model.eval()
+model.to('cuda')
+
+# Compile model for faster inference (PyTorch 2.0+)
+model = torch.compile(model)
+
+# First generation will be slower (compilation)
+y = model.generate(x, max_new_tokens=100, temperature=0.8, top_k=200)
+
+# Subsequent generations will be faster
+y = model.generate(x, max_new_tokens=100, temperature=0.8, top_k=200)
+```
+
+<Info>
+`torch.compile()` can provide 2-3x speedup for generation after initial compilation overhead. Requires PyTorch 2.0 or later.
+</Info>
+
+### Mixed Precision Inference
+
+```python
+import torch
+from contextlib import nullcontext
+
+model = GPT.from_pretrained('gpt2')
+model.eval()
+model.to('cuda')
+
+# Use bfloat16 for faster inference
+if torch.cuda.is_bf16_supported():
+    dtype = torch.bfloat16
+    ctx = torch.amp.autocast(device_type='cuda', dtype=dtype)
+else:
+    ctx = nullcontext()
+
+with torch.no_grad():
+    with ctx:
+        y = model.generate(x, max_new_tokens=500, temperature=0.8, top_k=200)
+```
+
+## Context Window Management
+
+The model automatically handles sequences longer than `block_size`:
+
+```python
+# From generate() method:
+idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+```
+
+When the sequence exceeds `block_size`, only the most recent tokens are used as context. This allows infinite generation, but the model can only attend to the last `block_size` tokens.
+
+<Note>
+**Sliding Window**: As generation continues beyond `block_size` tokens, the model uses a sliding window of the most recent tokens. Earlier context is effectively "forgotten".
+</Note>
+
+## Evaluation Mode
+
+Always set the model to evaluation mode for inference:
+
+```python
+model.eval()  # Important: disables dropout
+
+with torch.no_grad():  # Disables gradient computation
+    y = model.generate(x, max_new_tokens=100)
+```
+
+**Why this matters:**
+- `model.eval()`: Disables dropout layers
+- `torch.no_grad()`: Reduces memory usage and speeds up computation
+- Both are crucial for deterministic and efficient inference
+
+## Common Patterns
+
+### Deterministic Generation
+
+```python
+# Most likely tokens (nearly greedy)
+torch.manual_seed(42)
+y = model.generate(x, max_new_tokens=100, temperature=0.1, top_k=1)
+```
+
+### Creative Writing
+
+```python
+# Higher temperature, moderate top_k
+y = model.generate(x, max_new_tokens=500, temperature=1.2, top_k=100)
+```
+
+### Balanced Quality
+
+```python
+# Recommended starting point
+y = model.generate(x, max_new_tokens=200, temperature=0.8, top_k=200)
+```
+
+### Code Generation
+
+```python
+# Lower temperature for more precise output
+y = model.generate(x, max_new_tokens=300, temperature=0.5, top_k=50)
+```
+
+## See Also
+
+- [Architecture](/model/architecture) - Understanding the generation mechanism
+- [Configuration](/model/configuration) - Model parameters affecting generation

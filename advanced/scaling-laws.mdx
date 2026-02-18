@@ -1,0 +1,407 @@
+---
+title: 'Scaling Laws'
+description: 'Understanding scaling laws and compute-optimal model sizing'
+icon: 'chart-line'
+---
+
+## Overview
+
+Scaling laws describe the relationship between model size, dataset size, compute budget, and final loss. Understanding these relationships helps you choose optimal model configurations for your compute budget.
+
+## The Chinchilla Scaling Laws
+
+nanoGPT includes a Jupyter notebook (`scaling_laws.ipynb`) that implements the Chinchilla scaling laws for compute-optimal training.
+
+### Key Principle
+
+<Note>
+**Chinchilla's Finding**: For a given compute budget, you should balance model size and training tokens roughly equally. Most models are undertrained and oversized.
+</Note>
+
+## Loss Prediction Function
+
+From `scaling_laws.ipynb`, the loss can be approximated as:
+
+```python
+def L(N, D):
+    """ 
+    Approximates loss given N parameters and D dataset size (in tokens),
+    per Chinchilla paper.
+    """
+    E = 1.69  # entropy of natural language, limit of infinite model on infinite data
+    A = 406.4
+    B = 410.7
+    alpha = 0.34
+    beta = 0.28
+    return A / (N ** alpha) + B / (D ** beta) + E
+```
+
+Where:
+- `N`: Number of model parameters
+- `D`: Dataset size in tokens
+- `E`: Irreducible entropy (theoretical limit)
+- `A, B, alpha, beta`: Fitted constants from Chinchilla paper
+
+## Parameter Count Calculation
+
+From `scaling_laws.ipynb:50-69`, calculating GPT model parameters:
+
+```python
+def gpt_params(seq_len, vocab_size, d_model, num_heads, num_layers):
+    """ Given GPT config calculate total number of parameters """
+    ffw_size = 4*d_model  # in GPT the number of intermediate features is always 4*d_model
+    # token and position embeddings
+    embeddings = d_model * vocab_size + d_model * seq_len
+    # transformer blocks
+    attention = 3*d_model**2 + 3*d_model  # weights and biases
+    attproj = d_model**2 + d_model
+    ffw = d_model*(ffw_size) + ffw_size
+    ffwproj = ffw_size*d_model + d_model
+    layernorms = 2*2*d_model
+    # dense
+    ln_f = 2*d_model
+    dense = d_model*vocab_size  # note: no bias here
+    # note: embeddings are not included in the param count!
+    total_params = num_layers*(attention + attproj + ffw + ffwproj + layernorms) + ln_f + dense
+    return total_params
+
+# GPT-2 (small) configuration
+gpt2 = dict(seq_len=1024, vocab_size=50257, d_model=768, num_heads=12, num_layers=12)
+print(f"{gpt_params(**gpt2)/1e6:.2f}M parameters")  # 123.65M
+```
+
+## FLOPs Calculation
+
+From `scaling_laws.ipynb:178-215`, calculating training FLOPs:
+
+```python
+def chinchilla_flops(seq_len, vocab_size, d_model, num_heads, num_layers, ffw_size):
+    """ 
+    Calculate total number of FLOPs, see Chinchilla 
+    paper Appendix F as reference: https://arxiv.org/pdf/2203.15556.pdf
+    "" 
+    key_size = d_model // num_heads
+
+    # embeddings
+    embeddings = 2 * seq_len * vocab_size * d_model
+
+    # attention
+    # key, query, value projections
+    attention = 2 * 3 * seq_len * d_model * (key_size * num_heads)
+    # key @ query logits
+    attlogits = 2 * seq_len * seq_len * (key_size * num_heads)
+    # softmax
+    attsoftmax = 3 * num_heads * seq_len * seq_len
+    # softmax @ value reductions
+    attvalue = 2 * seq_len * seq_len * (key_size * num_heads)
+    # final linear
+    attlinear = 2 * seq_len * (key_size * num_heads) * d_model
+    att = attention + attlogits + attsoftmax + attvalue + attlinear
+    
+    # feed forward
+    dense = 2 * seq_len * (d_model * ffw_size + d_model * ffw_size)
+
+    # logits
+    logits = 2 * seq_len * d_model * vocab_size
+    
+    # per author correspondence, there is typo in the paper,
+    # they do not count embeddings and logits to repro table 4
+    forward_flops = num_layers * (att + dense)
+    backward_flops = 2 * forward_flops  # as in Kaplan et al. 2020
+    total_flops = forward_flops + backward_flops
+
+    return total_flops
+```
+
+### Approximate FLOPs Formula
+
+<Tip>
+**Rule of Thumb**: For training, FLOPs ≈ 6 × N × D
+
+Where:
+- N = number of parameters
+- D = number of training tokens
+- Factor of 6 accounts for forward pass (2×) and backward pass (4×)
+</Tip>
+
+## Compute-Optimal Model Sizing
+
+### Approach 1: Fixed Compute Budget
+
+Given a compute budget C (in FLOPs), find optimal N (parameters) and D (tokens):
+
+```python
+# From scaling_laws.ipynb
+c = 2.21e19  # target compute budget
+
+# sweep model sizes from 10M to 100B
+ns = 10 ** np.arange(7, 11, step=2**-4)
+
+# using C = 6*N*D, solve for D that maintains the compute budget c
+ds = c / (6 * ns)
+
+# evaluate the loss in each case
+losses = L(ns, ds)
+
+# find the argmin
+best = np.argmin(losses)
+print(f"best model size: {ns[best]/1e6:.2f}M")
+print(f"best dataset size: {ds[best]/1e9:.2f}B")
+```
+
+### Approach 2: Linear Regression
+
+From the Chinchilla Approach 2 data, fitting a power law:
+
+```python
+# Chinchilla Approach 2 optimal points
+# parameters, tokens
+raw = [
+    [400e6, 7.7e9],
+    [1e9, 20.0e9],
+    [10e9, 219.5e9],
+    [67e9, 1.7e12],
+    [175e9, 4.3e12],
+    [280e9, 7.1e12],
+    [520e9, 13.4e12],
+    [1e12, 26.5e12],
+    [10e12, 292.0e12],
+]
+
+# Fit: log(tokens) = m * log(params) + c
+# Result: m ≈ 1.04, c ≈ 0.94
+# Therefore: tokens ≈ 10^0.94 * params^1.04 ≈ 8.7 * params
+```
+
+<Note>
+**Key Finding**: Optimal training tokens ≈ 8.7 × number of parameters
+
+For example:
+- GPT-2 (124M params) → optimal ~1.1B tokens
+- GPT-3 Small (125M params) → optimal ~1.1B tokens  
+- GPT-3 (175B params) → optimal ~1.5T tokens
+</Note>
+
+## Practical Model Configurations
+
+### GPT-2 Variants
+
+<Tabs>
+  <Tab title="GPT-2 Small">
+    **124M Parameters**
+    ```python
+    n_layer = 12
+    n_head = 12
+    n_embd = 768
+    ```
+    - Optimal tokens: ~1.1B
+    - Training FLOPs: ~8.2e17
+    - Good for: Development, testing, small datasets
+  </Tab>
+  
+  <Tab title="GPT-2 Medium">
+    **350M Parameters**
+    ```python
+    n_layer = 24
+    n_head = 16
+    n_embd = 1024
+    ```
+    - Optimal tokens: ~3.0B
+    - Training FLOPs: ~6.3e18
+    - Good for: Medium-scale projects
+  </Tab>
+  
+  <Tab title="GPT-2 Large">
+    **774M Parameters**
+    ```python
+    n_layer = 36
+    n_head = 20
+    n_embd = 1280
+    ```
+    - Optimal tokens: ~6.7B
+    - Training FLOPs: ~1.6e19
+    - Good for: Serious applications
+  </Tab>
+  
+  <Tab title="GPT-2 XL">
+    **1.5B Parameters**
+    ```python
+    n_layer = 48
+    n_head = 25
+    n_embd = 1600
+    ```
+    - Optimal tokens: ~13.0B
+    - Training FLOPs: ~3.9e19
+    - Good for: Production systems
+  </Tab>
+</Tabs>
+
+## Model Architecture Configuration
+
+From `model.py:108-116`, the GPT configuration:
+
+```python
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304  # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+```
+
+<Warning>
+**vocab_size Padding**: Note that vocab_size is padded to 50304 (nearest multiple of 64) for better GPU efficiency, even though GPT-2's actual vocabulary is 50257.
+</Warning>
+
+## Scaling Relationships
+
+### Loss vs Parameters (Fixed Dataset)
+
+As model size increases with fixed dataset:
+- Loss decreases following power law: `L ∝ N^(-α)`
+- Eventually plateaus (model too large for data)
+- Returns diminish after Chinchilla-optimal point
+
+### Loss vs Dataset Size (Fixed Model)
+
+As dataset size increases with fixed model:
+- Loss decreases following power law: `L ∝ D^(-β)`
+- Eventually plateaus (data exceeds model capacity)
+- Underfitting occurs before optimal point
+
+### The Compute-Optimal Frontier
+
+From `scaling_laws.ipynb`, visualizing the compute-loss relationship:
+
+```python
+# Create 2D contour plot of loss
+ns = 10 ** np.arange(7, 11, step=2**-4)  # model sizes: 10M to 100B
+ds = 10 ** np.arange(9, 12, step=2**-4)  # dataset sizes: 1B to 1T
+
+loss2d = np.array([[L(n, d) for d in ds] for n in ns])
+# Minimum loss forms a "valley" - the compute-optimal frontier
+```
+
+## Training Duration Estimation
+
+### Time to Train
+
+Given:
+- Model parameters: N
+- Tokens to train: D  
+- GPU throughput: T tokens/sec
+- Number of GPUs: G
+
+Training time: `Time = D / (T × G)`
+
+### Example: GPT-2 on 8× A100
+
+From `config/train_gpt2.py:9-13`:
+
+```python
+# these make the total batch size be ~0.5M
+# 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
+batch_size = 12
+block_size = 1024
+gradient_accumulation_steps = 5 * 8
+```
+
+With typical A100 performance:
+- ~491,520 tokens/iteration
+- ~0.3 sec/iteration (after compilation)
+- ~1.6M tokens/sec throughput
+- For 300B tokens: ~52 hours (~2 days)
+
+From `config/train_gpt2.py:15-17`:
+
+```python
+# this makes total number of tokens be 300B
+max_iters = 600000
+lr_decay_iters = 600000
+```
+
+## Practical Guidelines
+
+### Choosing Model Size
+
+1. **Determine compute budget**
+   - GPU hours available
+   - Desired training time
+   
+2. **Calculate optimal N and D**
+   - Use Chinchilla formula or look up in table
+   - Balance model size vs training tokens
+
+3. **Adjust for constraints**
+   - GPU memory limits
+   - Dataset availability
+   - Inference latency requirements
+
+### Common Mistakes
+
+<Warning>
+**Overparameterization**: Using a model much larger than Chinchilla-optimal wastes compute. Better to use a smaller model trained on more tokens.
+</Warning>
+
+<Warning>
+**Undertraining**: Training for too few tokens leaves performance on the table. If you can only train 100M tokens, use a much smaller model!
+</Warning>
+
+### Rule of Thumb
+
+<Tip>
+If you double your compute budget:
+- Increase model size by ~41% (2^(1/2.04))
+- Increase training tokens by ~41%
+- Expected loss reduction: ~15%
+</Tip>
+
+## Model FLOPs Utilization (MFU)
+
+From `model.py:289-303`, MFU measures actual vs theoretical performance:
+
+```python
+def estimate_mfu(self, fwdbwd_per_iter, dt):
+    """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
+    N = self.get_num_params()
+    cfg = self.config
+    L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
+    
+    # FLOPs per token (see PaLM paper Appendix B)
+    flops_per_token = 6*N + 12*L*H*Q*T
+    flops_per_fwdbwd = flops_per_token * T
+    flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+    
+    # Compare to A100 peak
+    flops_achieved = flops_per_iter * (1.0/dt)
+    flops_promised = 312e12  # A100 GPU bfloat16 peak flops is 312 TFLOPS
+    mfu = flops_achieved / flops_promised
+    return mfu
+```
+
+<Note>
+MFU is tracked during training (train.py:325-326):
+```python
+mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
+```
+</Note>
+
+## References and Further Reading
+
+- [Chinchilla Paper](https://arxiv.org/abs/2203.15556) - Training Compute-Optimal Large Language Models
+- [Kaplan et al. 2020](https://arxiv.org/abs/2001.08361) - Scaling Laws for Neural Language Models  
+- [PaLM Paper Appendix B](https://arxiv.org/abs/2204.02311) - FLOPs calculation methodology
+- [Hoffmann et al. 2022](https://arxiv.org/abs/2203.15556) - Chinchilla optimal training
+
+## Interactive Exploration
+
+The `scaling_laws.ipynb` notebook in the nanoGPT repository provides interactive visualizations and calculations. You can:
+
+1. Query optimal training tokens for any model size
+2. Estimate losses for different configurations  
+3. Visualize the compute-optimal frontier
+4. Calculate FLOPs for your specific setup

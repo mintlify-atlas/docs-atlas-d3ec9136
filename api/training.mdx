@@ -1,0 +1,364 @@
+---
+title: 'Training Parameters'
+description: 'Configuration parameters for train.py'
+---
+
+# Training Parameters
+
+The `train.py` script accepts numerous configuration parameters for training GPT models. Parameters can be set via command line arguments or config files.
+
+## Usage
+
+```bash
+# Single GPU training
+python train.py --batch_size=32 --compile=False
+
+# Distributed training (4 GPUs)
+torchrun --standalone --nproc_per_node=4 train.py
+
+# Using a config file
+python train.py config/train_shakespeare.py
+```
+
+## I/O Parameters
+
+<ParamField path="out_dir" type="str" default="'out'">
+  Directory for saving checkpoints and logs
+</ParamField>
+
+<ParamField path="eval_interval" type="int" default="2000">
+  How often (in iterations) to evaluate and save checkpoints
+</ParamField>
+
+<ParamField path="log_interval" type="int" default="1">
+  How often (in iterations) to log training metrics
+</ParamField>
+
+<ParamField path="eval_iters" type="int" default="200">
+  Number of iterations to run for evaluation
+</ParamField>
+
+<ParamField path="eval_only" type="bool" default="False">
+  If True, script exits after first evaluation (useful for validation)
+</ParamField>
+
+<ParamField path="always_save_checkpoint" type="bool" default="True">
+  If True, always saves a checkpoint after each eval. If False, only saves when val loss improves.
+</ParamField>
+
+<ParamField path="init_from" type="str" default="'scratch'">
+  Initialization method: `'scratch'`, `'resume'`, or `'gpt2'`/`'gpt2-medium'`/`'gpt2-large'`/`'gpt2-xl'`
+</ParamField>
+
+## Data Parameters
+
+<ParamField path="dataset" type="str" default="'openwebtext'">
+  Name of the dataset (must have `train.bin` and `val.bin` in `data/{dataset}/`)
+</ParamField>
+
+<ParamField path="gradient_accumulation_steps" type="int" default="40">
+  Number of steps to accumulate gradients over. Used to simulate larger batch sizes.
+</ParamField>
+
+<ParamField path="batch_size" type="int" default="12">
+  Micro-batch size per GPU. Effective batch size = `batch_size * gradient_accumulation_steps * num_gpus`
+</ParamField>
+
+<ParamField path="block_size" type="int" default="1024">
+  Maximum sequence length / context window
+</ParamField>
+
+## Model Parameters
+
+<ParamField path="n_layer" type="int" default="12">
+  Number of transformer layers
+</ParamField>
+
+<ParamField path="n_head" type="int" default="12">
+  Number of attention heads
+</ParamField>
+
+<ParamField path="n_embd" type="int" default="768">
+  Embedding dimension
+</ParamField>
+
+<ParamField path="dropout" type="float" default="0.0">
+  Dropout rate (0.0 for pretraining, 0.1+ for finetuning)
+</ParamField>
+
+<ParamField path="bias" type="bool" default="False">
+  Whether to use bias in Linear and LayerNorm layers
+</ParamField>
+
+## Optimizer Parameters
+
+<ParamField path="learning_rate" type="float" default="6e-4">
+  Maximum learning rate
+</ParamField>
+
+<ParamField path="max_iters" type="int" default="600000">
+  Total number of training iterations
+</ParamField>
+
+<ParamField path="weight_decay" type="float" default="1e-1">
+  Weight decay coefficient for AdamW
+</ParamField>
+
+<ParamField path="beta1" type="float" default="0.9">
+  Beta1 parameter for AdamW optimizer
+</ParamField>
+
+<ParamField path="beta2" type="float" default="0.95">
+  Beta2 parameter for AdamW optimizer
+</ParamField>
+
+<ParamField path="grad_clip" type="float" default="1.0">
+  Gradient clipping value. Set to 0.0 to disable.
+</ParamField>
+
+## Learning Rate Decay
+
+<ParamField path="decay_lr" type="bool" default="True">
+  Whether to use learning rate decay
+</ParamField>
+
+<ParamField path="warmup_iters" type="int" default="2000">
+  Number of warmup iterations for learning rate
+</ParamField>
+
+<ParamField path="lr_decay_iters" type="int" default="600000">
+  Number of iterations for learning rate decay (should be ~= max_iters)
+</ParamField>
+
+<ParamField path="min_lr" type="float" default="6e-5">
+  Minimum learning rate (should be ~= learning_rate/10)
+</ParamField>
+
+## Weights & Biases Logging
+
+<ParamField path="wandb_log" type="bool" default="False">
+  Whether to log to Weights & Biases
+</ParamField>
+
+<ParamField path="wandb_project" type="str" default="'owt'">
+  W&B project name
+</ParamField>
+
+<ParamField path="wandb_run_name" type="str" default="'gpt2'">
+  W&B run name
+</ParamField>
+
+## System Parameters
+
+<ParamField path="device" type="str" default="'cuda'">
+  Device to use: `'cpu'`, `'cuda'`, `'cuda:0'`, `'cuda:1'`, or `'mps'` (for Mac)
+</ParamField>
+
+<ParamField path="dtype" type="str" default="'bfloat16' or 'float16'">
+  Data type for training: `'float32'`, `'bfloat16'`, or `'float16'`. Defaults to bfloat16 if supported.
+</ParamField>
+
+<ParamField path="compile" type="bool" default="True">
+  Whether to use PyTorch 2.0 compile for faster training
+</ParamField>
+
+## DDP Parameters
+
+<ParamField path="backend" type="str" default="'nccl'">
+  Backend for distributed training: `'nccl'` (recommended for CUDA) or `'gloo'`
+</ParamField>
+
+## Configuration Examples
+
+### Training GPT-2 (124M) from Scratch
+
+```bash
+python train.py \
+    --out_dir=out-gpt2 \
+    --dataset=openwebtext \
+    --init_from=scratch \
+    --n_layer=12 \
+    --n_head=12 \
+    --n_embd=768 \
+    --batch_size=12 \
+    --gradient_accumulation_steps=40 \
+    --max_iters=600000 \
+    --learning_rate=6e-4 \
+    --dropout=0.0 \
+    --compile=True
+```
+
+### Finetuning GPT-2 on Custom Dataset
+
+```bash
+python train.py \
+    --out_dir=out-shakespeare \
+    --dataset=shakespeare \
+    --init_from=gpt2 \
+    --batch_size=1 \
+    --gradient_accumulation_steps=32 \
+    --max_iters=5000 \
+    --learning_rate=1e-4 \
+    --dropout=0.1 \
+    --warmup_iters=100 \
+    --eval_interval=250
+```
+
+### Small Model for Experimentation
+
+```bash
+python train.py \
+    --out_dir=out-small \
+    --dataset=shakespeare_char \
+    --init_from=scratch \
+    --n_layer=6 \
+    --n_head=6 \
+    --n_embd=384 \
+    --batch_size=64 \
+    --block_size=256 \
+    --max_iters=5000 \
+    --compile=False
+```
+
+### Distributed Training (4 GPUs)
+
+```bash
+torchrun --standalone --nproc_per_node=4 train.py \
+    --out_dir=out-gpt2-ddp \
+    --dataset=openwebtext \
+    --batch_size=12 \
+    --gradient_accumulation_steps=10 \
+    --max_iters=600000
+```
+
+<Note>
+  When using DDP, the `gradient_accumulation_steps` is automatically divided by the number of GPUs.
+</Note>
+
+## Using Config Files
+
+Create a config file (e.g., `config/my_config.py`):
+
+```python
+# Training config for Shakespeare dataset
+
+# I/O
+out_dir = 'out-shakespeare'
+eval_interval = 250
+eval_iters = 200
+log_interval = 10
+
+# Data
+dataset = 'shakespeare_char'
+gradient_accumulation_steps = 1
+batch_size = 64
+block_size = 256
+
+# Model
+n_layer = 6
+n_head = 6
+n_embd = 384
+dropout = 0.2
+
+# Optimizer
+learning_rate = 1e-3
+max_iters = 5000
+weight_decay = 1e-1
+
+# Learning rate
+decay_lr = True
+warmup_iters = 100
+lr_decay_iters = 5000
+
+# System
+device = 'cuda'
+compile = False
+```
+
+Run with:
+
+```bash
+python train.py config/my_config.py
+```
+
+## Checkpointing
+
+Checkpoints are saved to `{out_dir}/ckpt.pt` and contain:
+
+```python
+checkpoint = {
+    'model': model.state_dict(),
+    'optimizer': optimizer.state_dict(),
+    'model_args': model_args,
+    'iter_num': iter_num,
+    'best_val_loss': best_val_loss,
+    'config': config,
+}
+```
+
+To resume training:
+
+```bash
+python train.py --init_from=resume --out_dir=out-gpt2
+```
+
+## Learning Rate Schedule
+
+The training script uses a cosine decay schedule with warmup:
+
+```python
+# Linear warmup
+if iter < warmup_iters:
+    lr = learning_rate * (iter + 1) / (warmup_iters + 1)
+# Cosine decay
+elif iter < lr_decay_iters:
+    decay_ratio = (iter - warmup_iters) / (lr_decay_iters - warmup_iters)
+    lr = min_lr + 0.5 * (learning_rate - min_lr) * (1 + cos(pi * decay_ratio))
+# Constant minimum
+else:
+    lr = min_lr
+```
+
+## Performance Tips
+
+<Tabs>
+  <Tab title="Speed">
+    - Set `compile=True` for ~2x speedup (PyTorch 2.0+)
+    - Use `dtype='bfloat16'` on Ampere+ GPUs
+    - Set `bias=False` for ~2-3% speedup
+    - Increase `batch_size` to maximize GPU utilization
+    - Use multiple GPUs with DDP for linear scaling
+  </Tab>
+  
+  <Tab title="Memory">
+    - Reduce `batch_size` if OOM
+    - Increase `gradient_accumulation_steps` to maintain effective batch size
+    - Reduce `block_size` for longer contexts
+    - Use `dtype='float16'` for less memory (but less stable)
+  </Tab>
+  
+  <Tab title="Quality">
+    - Increase `max_iters` for better convergence
+    - Use `dropout > 0` when finetuning
+    - Tune `learning_rate` (typically 1e-4 to 6e-4)
+    - Ensure `eval_iters` is large enough for stable validation
+  </Tab>
+</Tabs>
+
+## Effective Batch Size Calculation
+
+```python
+effective_batch_size = batch_size * gradient_accumulation_steps * num_gpus * block_size
+
+# Example: Single GPU
+# 12 * 40 * 1 * 1024 = 491,520 tokens per iteration
+
+# Example: 4 GPUs with DDP
+# 12 * 10 * 4 * 1024 = 491,520 tokens per iteration
+```
+
+## See Also
+
+- [GPT](/api/gpt) - Model class
+- [GPTConfig](/api/gpt-config) - Model configuration
+- [Sampling Parameters](/api/sampling) - Generation configuration

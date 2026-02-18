@@ -1,0 +1,249 @@
+---
+title: 'GPTConfig'
+description: 'Configuration dataclass for GPT models'
+---
+
+# GPTConfig
+
+The `GPTConfig` dataclass defines all hyperparameters for the GPT model architecture.
+
+## Definition
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True
+```
+
+## Parameters
+
+<ParamField path="block_size" type="int" default="1024">
+  Maximum sequence length (context window) for the model. Also called context length or maximum context size.
+</ParamField>
+
+<ParamField path="vocab_size" type="int" default="50304">
+  Size of the vocabulary. Default is GPT-2's 50257 padded to 50304 (nearest multiple of 64) for efficiency.
+</ParamField>
+
+<ParamField path="n_layer" type="int" default="12">
+  Number of transformer blocks (layers) in the model.
+</ParamField>
+
+<ParamField path="n_head" type="int" default="12">
+  Number of attention heads in each transformer block. Must evenly divide `n_embd`.
+</ParamField>
+
+<ParamField path="n_embd" type="int" default="768">
+  Embedding dimension / model width. Also called hidden size or d_model.
+</ParamField>
+
+<ParamField path="dropout" type="float" default="0.0">
+  Dropout probability applied to embeddings, attention, and MLP layers. Use 0.0 for pretraining, 0.1+ for finetuning.
+</ParamField>
+
+<ParamField path="bias" type="bool" default="True">
+  Whether to use bias terms in Linear and LayerNorm layers. `False` is slightly better and faster, but `True` matches GPT-2.
+</ParamField>
+
+## Usage
+
+### Creating a Custom Configuration
+
+```python
+from model import GPTConfig, GPT
+
+# Create a small model for experimentation
+config = GPTConfig(
+    block_size=256,
+    vocab_size=10000,
+    n_layer=6,
+    n_head=6,
+    n_embd=384,
+    dropout=0.1,
+    bias=False
+)
+
+model = GPT(config)
+```
+
+### Standard Configurations
+
+<Tabs>
+  <Tab title="GPT-2 (124M)">
+    ```python
+    config = GPTConfig(
+        block_size=1024,
+        vocab_size=50257,
+        n_layer=12,
+        n_head=12,
+        n_embd=768,
+        dropout=0.0,
+        bias=True
+    )
+    ```
+    124M parameters - Good for experimentation and small datasets
+  </Tab>
+  
+  <Tab title="GPT-2 Medium (350M)">
+    ```python
+    config = GPTConfig(
+        block_size=1024,
+        vocab_size=50257,
+        n_layer=24,
+        n_head=16,
+        n_embd=1024,
+        dropout=0.0,
+        bias=True
+    )
+    ```
+    350M parameters - Balanced size for most tasks
+  </Tab>
+  
+  <Tab title="GPT-2 Large (774M)">
+    ```python
+    config = GPTConfig(
+        block_size=1024,
+        vocab_size=50257,
+        n_layer=36,
+        n_head=20,
+        n_embd=1280,
+        dropout=0.0,
+        bias=True
+    )
+    ```
+    774M parameters - High quality generations
+  </Tab>
+  
+  <Tab title="GPT-2 XL (1558M)">
+    ```python
+    config = GPTConfig(
+        block_size=1024,
+        vocab_size=50257,
+        n_layer=48,
+        n_head=25,
+        n_embd=1600,
+        dropout=0.0,
+        bias=True
+    )
+    ```
+    1.5B parameters - Best quality, requires significant compute
+  </Tab>
+</Tabs>
+
+### Efficient Training Configuration
+
+```python
+# Optimized for training speed
+config = GPTConfig(
+    block_size=1024,
+    vocab_size=50304,  # Padded to multiple of 64
+    n_layer=12,
+    n_head=12,
+    n_embd=768,
+    dropout=0.0,  # No dropout for pretraining
+    bias=False     # Faster and slightly better
+)
+```
+
+<Note>
+  Setting `vocab_size` to a multiple of 64 (or powers of 2) improves GPU utilization. The default 50304 is 50257 (GPT-2 vocab size) rounded up.
+</Note>
+
+### Finetuning Configuration
+
+```python
+# Load pretrained config and adjust dropout
+from model import GPT
+
+model = GPT.from_pretrained('gpt2', override_args={'dropout': 0.1})
+config = model.config
+
+# Now config has dropout=0.1 for finetuning
+```
+
+## Configuration Constraints
+
+<Warning>
+  **Important constraints to follow:**
+  - `n_embd` must be divisible by `n_head` (head dimension = `n_embd // n_head`)
+  - `block_size` should be &lt;= 1024 when loading pretrained GPT-2 weights
+  - `vocab_size` must match your tokenizer's vocabulary size
+</Warning>
+
+## Parameter Count Calculation
+
+The approximate number of parameters can be calculated as:
+
+```python
+# Rough estimate
+params = 12 * n_layer * n_embd**2
+
+# Example: GPT-2 124M
+# params = 12 * 12 * 768**2 ≈ 85M
+# (actual is 124M due to embeddings and other components)
+```
+
+For exact counts, use:
+
+```python
+model = GPT(config)
+num_params = model.get_num_params()
+print(f"{num_params/1e6:.2f}M parameters")
+```
+
+## Memory Requirements
+
+Approximate GPU memory needed (in GB) for training:
+
+| Model Size | Parameters | Training (mixed precision) | Inference |
+|------------|-----------|---------------------------|------------|
+| Small | 124M | ~4 GB | ~1 GB |
+| Medium | 350M | ~8 GB | ~2 GB |
+| Large | 774M | ~16 GB | ~4 GB |
+| XL | 1558M | ~32 GB | ~8 GB |
+
+<Note>
+  These are approximate values. Actual memory usage depends on batch size, sequence length, and optimization settings.
+</Note>
+
+## Design Choices
+
+### Why vocab_size = 50304?
+
+GPT-2 uses 50257 tokens, but 50304 is the nearest multiple of 64, which:
+- Improves GPU memory alignment
+- Enables better tensor core utilization
+- Increases training speed by ~5-10%
+
+### Why bias = False?
+
+Removing bias terms:
+- Reduces parameter count slightly
+- Often improves training stability
+- Makes models train ~2-3% faster
+- Provides comparable or better performance
+
+Set `bias=True` only when loading GPT-2 checkpoints or for exact reproducibility.
+
+### Why dropout = 0.0 for pretraining?
+
+Large-scale pretraining typically doesn't need dropout because:
+- The dataset is massive and diverse
+- Models don't overfit easily
+- Training is more stable without dropout
+
+Use `dropout > 0.0` (e.g., 0.1-0.2) when finetuning on smaller datasets.
+
+## See Also
+
+- [GPT](/api/gpt) - Main model class
+- [Training Parameters](/api/training) - Training script configuration
+- [Block](/api/block) - Transformer block that uses this config

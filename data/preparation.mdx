@@ -1,0 +1,259 @@
+---
+title: 'Data Preparation'
+description: 'Learn how to prepare datasets for training with nanoGPT'
+---
+
+# Data Preparation
+
+NanoGPT uses a simple and efficient data format: tokenized datasets stored as binary files. This guide walks you through preparing your data for training.
+
+## Overview
+
+The data preparation process:
+
+<Steps>
+  <Step title="Download or load raw text data">
+    Start with raw text data from sources like datasets, files, or web scraping
+  </Step>
+  
+  <Step title="Tokenize the data">
+    Convert text to integer token IDs using either character-level or BPE tokenization
+  </Step>
+  
+  <Step title="Split into train/val sets">
+    Create training and validation splits (typically 90/10)
+  </Step>
+  
+  <Step title="Export to binary files">
+    Save as `train.bin` and `val.bin` using numpy arrays with `uint16` dtype
+  </Step>
+</Steps>
+
+## Binary Format
+
+All datasets in nanoGPT are stored as binary files containing token IDs:
+
+- **Data type**: `np.uint16` (supports vocabularies up to 65,536 tokens)
+- **Format**: Flat array of token IDs
+- **Files**: `train.bin` and `val.bin`
+- **Loading**: Uses `np.memmap` for memory-efficient access
+
+<Note>
+The `uint16` dtype is sufficient for GPT-2's vocabulary (50,257 tokens) and provides 2x memory savings compared to `uint32`.
+</Note>
+
+## Memory-Mapped Loading
+
+During training, nanoGPT loads data using numpy's `memmap` to avoid loading entire datasets into RAM:
+
+```python
+# From train.py:114-122
+def get_batch(split):
+    # We recreate np.memmap every batch to avoid a memory leak
+    if split == 'train':
+        data = np.memmap(os.path.join(data_dir, 'train.bin'), 
+                        dtype=np.uint16, mode='r')
+    else:
+        data = np.memmap(os.path.join(data_dir, 'val.bin'), 
+                        dtype=np.uint16, mode='r')
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    return x, y
+```
+
+<Warning>
+The memmap is recreated every batch to prevent memory leaks. This is a known numpy memmap issue when iterating over large files.
+</Warning>
+
+## Preparation Scripts
+
+Each dataset in the `data/` directory includes a `prepare.py` script:
+
+```bash
+# Character-level tokenization (Shakespeare)
+cd data/shakespeare_char
+python prepare.py
+
+# BPE tokenization (Shakespeare)
+cd data/shakespeare
+python prepare.py
+
+# Large-scale dataset (OpenWebText)
+cd data/openwebtext
+python prepare.py
+```
+
+## Dataset Directory Structure
+
+A typical prepared dataset directory contains:
+
+```
+data/shakespeare_char/
+├── prepare.py          # Preparation script
+├── input.txt          # Raw text data (downloaded by prepare.py)
+├── train.bin          # Training data (token IDs)
+├── val.bin            # Validation data (token IDs)
+└── meta.pkl           # Metadata (for character-level: vocab_size, itos, stoi)
+```
+
+<Note>
+The `meta.pkl` file is only created for character-level tokenization to store the vocabulary mappings. BPE tokenization uses the standard tiktoken encoder.
+</Note>
+
+## Metadata File (Character-Level)
+
+For character-level tokenization, a `meta.pkl` file stores vocabulary information:
+
+```python
+meta = {
+    'vocab_size': vocab_size,  # Number of unique characters
+    'itos': itos,              # Index to string mapping {0: 'a', 1: 'b', ...}
+    'stoi': stoi,              # String to index mapping {'a': 0, 'b': 1, ...}
+}
+```
+
+This metadata is loaded during training to initialize the model with the correct vocabulary size:
+
+```python
+# From train.py:137-144
+meta_path = os.path.join(data_dir, 'meta.pkl')
+meta_vocab_size = None
+if os.path.exists(meta_path):
+    with open(meta_path, 'rb') as f:
+        meta = pickle.load(f)
+    meta_vocab_size = meta['vocab_size']
+    print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+```
+
+## Creating Custom Datasets
+
+To prepare your own dataset:
+
+<Steps>
+  <Step title="Create a new directory">
+    ```bash
+    mkdir -p data/my_dataset
+    cd data/my_dataset
+    ```
+  </Step>
+  
+  <Step title="Write a prepare.py script">
+    Use one of the existing scripts as a template (see examples below)
+  </Step>
+  
+  <Step title="Run the preparation">
+    ```bash
+    python prepare.py
+    ```
+  </Step>
+  
+  <Step title="Train on your dataset">
+    ```bash
+    python train.py --dataset=my_dataset
+    ```
+  </Step>
+</Steps>
+
+### Example: BPE Tokenization Template
+
+```python
+import os
+import numpy as np
+import tiktoken
+
+# Load your text data
+with open('your_data.txt', 'r', encoding='utf-8') as f:
+    data = f.read()
+
+# Create train/val split (90/10)
+n = len(data)
+train_data = data[:int(n*0.9)]
+val_data = data[int(n*0.9):]
+
+# Tokenize with GPT-2 BPE
+enc = tiktoken.get_encoding("gpt2")
+train_ids = enc.encode_ordinary(train_data)
+val_ids = enc.encode_ordinary(val_data)
+
+print(f"train has {len(train_ids):,} tokens")
+print(f"val has {len(val_ids):,} tokens")
+
+# Export to binary files
+train_ids = np.array(train_ids, dtype=np.uint16)
+val_ids = np.array(val_ids, dtype=np.uint16)
+train_ids.tofile('train.bin')
+val_ids.tofile('val.bin')
+```
+
+### Example: Character-Level Tokenization Template
+
+```python
+import os
+import pickle
+import numpy as np
+
+# Load your text data
+with open('your_data.txt', 'r') as f:
+    data = f.read()
+
+print(f"length of dataset in characters: {len(data):,}")
+
+# Build character vocabulary
+chars = sorted(list(set(data)))
+vocab_size = len(chars)
+print(f"vocab size: {vocab_size:,}")
+
+# Create character mappings
+stoi = {ch: i for i, ch in enumerate(chars)}
+itos = {i: ch for i, ch in enumerate(chars)}
+
+def encode(s):
+    return [stoi[c] for c in s]
+
+def decode(l):
+    return ''.join([itos[i] for i in l])
+
+# Create train/val split
+n = len(data)
+train_data = data[:int(n*0.9)]
+val_data = data[int(n*0.9):]
+
+# Encode to integers
+train_ids = encode(train_data)
+val_ids = encode(val_data)
+
+print(f"train has {len(train_ids):,} tokens")
+print(f"val has {len(val_ids):,} tokens")
+
+# Export to binary files
+train_ids = np.array(train_ids, dtype=np.uint16)
+val_ids = np.array(val_ids, dtype=np.uint16)
+train_ids.tofile('train.bin')
+val_ids.tofile('val.bin')
+
+# Save metadata
+meta = {
+    'vocab_size': vocab_size,
+    'itos': itos,
+    'stoi': stoi,
+}
+with open('meta.pkl', 'wb') as f:
+    pickle.dump(meta, f)
+```
+
+## Large-Scale Datasets
+
+For large datasets like OpenWebText, the preparation process uses:
+
+- **Hugging Face datasets**: For efficient downloading and processing
+- **Multiprocessing**: Parallel tokenization with `num_proc` parameter
+- **Batched writing**: Writing to memmap in batches for better performance
+
+See the [OpenWebText example](/data/datasets#openwebtext) for details.
+
+## Next Steps
+
+- Learn about [available datasets](/data/datasets)
+- Understand [tokenization approaches](/data/tokenization)
+- Start [training your model](/training/overview)

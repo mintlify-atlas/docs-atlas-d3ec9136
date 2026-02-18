@@ -1,0 +1,249 @@
+---
+title: Installation
+description: Set up nanoGPT and install all required dependencies
+---
+
+# Installation
+
+Get nanoGPT up and running in just a few minutes. The installation process is straightforward with minimal dependencies.
+
+## Prerequisites
+
+<Note>
+  nanoGPT requires Python 3.8 or later. Make sure you have a compatible Python version installed.
+</Note>
+
+### Hardware Requirements
+
+While nanoGPT can run on various hardware configurations, here are the recommended setups:
+
+- **GPU Training** (Recommended): NVIDIA GPU with CUDA support (8GB+ VRAM)
+- **CPU Training**: Any modern CPU (slower but works for small models)
+- **Apple Silicon**: M1/M2/M3 Macs with Metal Performance Shaders support
+
+## Quick Install
+
+### Step 1: Clone the Repository
+
+```bash
+git clone https://github.com/karpathy/nanoGPT.git
+cd nanoGPT
+```
+
+### Step 2: Install Dependencies
+
+Install all required packages with pip:
+
+```bash
+pip install torch numpy transformers datasets tiktoken wandb tqdm
+```
+
+<Accordion title="What each dependency does">
+  - **torch**: PyTorch deep learning framework - the core dependency
+  - **numpy**: Numerical computing library for data processing
+  - **transformers**: Hugging Face library for loading pretrained GPT-2 checkpoints
+  - **datasets**: Hugging Face datasets library for downloading datasets like OpenWebText
+  - **tiktoken**: OpenAI's fast BPE tokenizer
+  - **wandb**: Weights & Biases for experiment tracking (optional)
+  - **tqdm**: Progress bars for training loops
+</Accordion>
+
+## Platform-Specific Setup
+
+### NVIDIA GPU (CUDA)
+
+For GPU acceleration, install PyTorch with CUDA support:
+
+<Steps>
+  <Step title="Check CUDA Version">
+    Verify your CUDA version:
+    ```bash
+    nvidia-smi
+    ```
+  </Step>
+  
+  <Step title="Install PyTorch with CUDA">
+    Visit [pytorch.org](https://pytorch.org/get-started/locally/) and select your configuration, or use:
+    
+    ```bash
+    # For CUDA 11.8
+    pip install torch --index-url https://download.pytorch.org/whl/cu118
+    
+    # For CUDA 12.1
+    pip install torch --index-url https://download.pytorch.org/whl/cu121
+    ```
+  </Step>
+  
+  <Step title="Verify Installation">
+    Test CUDA availability:
+    ```python
+    import torch
+    print(torch.cuda.is_available())  # Should print: True
+    print(torch.cuda.get_device_name(0))
+    ```
+  </Step>
+</Steps>
+
+### Apple Silicon (M1/M2/M3)
+
+For Apple Silicon Macs, ensure you have a recent PyTorch version with MPS (Metal Performance Shaders) support:
+
+```bash
+# Install latest PyTorch
+pip install --upgrade torch
+
+# Verify MPS availability
+python -c "import torch; print(torch.backends.mps.is_available())"
+```
+
+<Note>
+  Use `--device=mps` when training on Apple Silicon for 2-3x speedup over CPU.
+</Note>
+
+### CPU Only
+
+For CPU-only environments (e.g., development machines without GPU):
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+<Warning>
+  CPU training is significantly slower. Use smaller models and reduced hyperparameters.
+</Warning>
+
+## PyTorch 2.0 and Compilation
+
+nanoGPT leverages PyTorch 2.0's `torch.compile()` feature for significant speedups:
+
+```python
+# Enabled by default in train.py
+compile = True  # ~40% faster iteration time
+```
+
+### Benefits
+- Reduces iteration time from ~250ms to ~135ms
+- No code changes required - just one flag
+- Automatic graph optimization
+
+### Disable if Needed
+
+If you encounter compatibility issues:
+
+```bash
+python train.py --compile=False
+```
+
+<Note>
+  PyTorch 2.0 compilation is not yet available on all platforms (e.g., Windows). The `--compile=False` flag ensures compatibility.
+</Note>
+
+## Verify Installation
+
+Run this quick test to verify everything is working:
+
+```python verify.py
+import torch
+import numpy as np
+from model import GPTConfig, GPT
+
+# Check PyTorch
+print(f"PyTorch version: {torch.__version__}")
+print(f"CUDA available: {torch.cuda.is_available()}")
+
+# Check model initialization
+config = GPTConfig(n_layer=4, n_head=4, n_embd=128, block_size=64, vocab_size=1000)
+model = GPT(config)
+print(f"Model initialized with {model.get_num_params()/1e6:.2f}M parameters")
+
+print("\n✓ Installation successful!")
+```
+
+Run it:
+```bash
+python verify.py
+```
+
+## Optional: Weights & Biases Setup
+
+For experiment tracking with W&B:
+
+<Steps>
+  <Step title="Create Account">
+    Sign up at [wandb.ai](https://wandb.ai)
+  </Step>
+  
+  <Step title="Login">
+    ```bash
+    wandb login
+    ```
+  </Step>
+  
+  <Step title="Enable in Training">
+    ```bash
+    python train.py --wandb_log=True --wandb_project=my-project
+    ```
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+### Import Errors
+
+<Accordion title="ModuleNotFoundError: No module named 'torch'">
+  PyTorch is not installed. Run:
+  ```bash
+  pip install torch
+  ```
+</Accordion>
+
+<Accordion title="ImportError: cannot import name 'GPT' from 'model'">
+  Make sure you're in the nanoGPT directory:
+  ```bash
+  cd nanoGPT
+  python -c "from model import GPT; print('Success')"
+  ```
+</Accordion>
+
+### CUDA Errors
+
+<Accordion title="RuntimeError: CUDA out of memory">
+  Reduce batch size or model size:
+  ```bash
+  python train.py --batch_size=8 --block_size=512
+  ```
+</Accordion>
+
+<Accordion title="torch.cuda.is_available() returns False">
+  1. Verify NVIDIA drivers are installed: `nvidia-smi`
+  2. Reinstall PyTorch with CUDA support (see above)
+  3. Check CUDA version compatibility
+</Accordion>
+
+### Platform-Specific Issues
+
+<Accordion title="Windows: torch.compile() not available">
+  This is a known limitation. Disable compilation:
+  ```bash
+  python train.py --compile=False
+  ```
+</Accordion>
+
+<Accordion title="macOS: MPS backend not available">
+  Update to the latest PyTorch version:
+  ```bash
+  pip install --upgrade torch
+  ```
+</Accordion>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Train your first model in under 5 minutes
+  </Card>
+  
+  <Card title="Training Guide" icon="graduation-cap" href="/training">
+    Learn about training configuration and hyperparameters
+  </Card>
+</CardGroup>

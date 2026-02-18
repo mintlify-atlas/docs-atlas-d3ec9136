@@ -1,0 +1,256 @@
+---
+title: Training Overview
+description: Understanding nanoGPT's training architecture and core concepts
+---
+
+# Training Overview
+
+nanoGPT is designed to make training medium-sized GPT models simple, fast, and transparent. The entire training loop is contained in a ~300-line `train.py` script that's easy to understand and modify.
+
+## Core Architecture
+
+The training system is built around three main components:
+
+<Steps>
+  <Step title="Data Loading">
+    Uses memory-mapped numpy arrays (`train.bin`, `val.bin`) for efficient data access without loading everything into RAM.
+  </Step>
+  
+  <Step title="Model Configuration">
+    GPT models are configured via Python files in the `config/` directory that override default hyperparameters.
+  </Step>
+  
+  <Step title="Training Loop">
+    A straightforward training loop with gradient accumulation, checkpointing, and optional distributed training.
+  </Step>
+</Steps>
+
+## Key Features
+
+### PyTorch 2.0 Compilation
+
+By default, nanoGPT uses `torch.compile()` to optimize the model:
+
+```python
+compile = True  # use PyTorch 2.0 to compile the model to be faster
+```
+
+This typically reduces iteration time by ~40-50% (e.g., from 250ms to 135ms per iteration).
+
+<Note>
+  PyTorch 2.0 compilation is not available on all platforms (e.g., Windows). Disable it with `--compile=False` if needed.
+</Note>
+
+### Mixed Precision Training
+
+nanoGPT automatically selects the best dtype for your hardware:
+
+```python
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
+```
+
+- **bfloat16**: Preferred on modern GPUs (A100, H100) for better numerical stability
+- **float16**: Falls back to FP16 with automatic gradient scaling
+- **float32**: Available for CPU or debugging
+
+### Learning Rate Schedule
+
+Uses cosine decay with linear warmup (train.py:231):
+
+1. **Warmup phase**: Linear increase from 0 to `learning_rate` over `warmup_iters` steps
+2. **Cosine decay**: Smooth decay from `learning_rate` to `min_lr` over `lr_decay_iters` steps
+3. **Final phase**: Constant `min_lr` after decay period
+
+## Model Hyperparameters
+
+The default configuration trains GPT-2 (124M parameters) on OpenWebText:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `n_layer` | 12 | Number of transformer layers |
+| `n_head` | 12 | Number of attention heads per layer |
+| `n_embd` | 768 | Embedding dimension |
+| `block_size` | 1024 | Maximum context length (tokens) |
+| `batch_size` | 12 | Micro-batch size per GPU |
+| `gradient_accumulation_steps` | 40 | Accumulate gradients over multiple steps |
+| `dropout` | 0.0 | Dropout rate (0.0 for pretraining, 0.1+ for finetuning) |
+| `bias` | False | Use bias in LayerNorm and Linear layers |
+
+<Info>
+  Effective batch size = `batch_size` × `gradient_accumulation_steps` × `num_gpus` × `block_size`
+  
+  Default: 12 × 40 × 1 × 1024 = ~491K tokens per iteration
+</Info>
+
+## Training Hyperparameters
+
+### Optimizer Settings
+
+```python
+learning_rate = 6e-4      # max learning rate
+weight_decay = 1e-1        # AdamW weight decay
+beta1 = 0.9                # Adam beta1
+beta2 = 0.95               # Adam beta2  
+grad_clip = 1.0            # gradient clipping threshold
+```
+
+### Training Duration
+
+```python
+max_iters = 600000         # total training iterations
+warmup_iters = 2000        # warmup steps
+lr_decay_iters = 600000    # decay over full training
+min_lr = 6e-5              # minimum learning rate (~learning_rate/10)
+```
+
+## Initialization Modes
+
+nanoGPT supports three initialization modes via the `init_from` parameter:
+
+<Tabs>
+  <Tab title="scratch">
+    Train a new model from random initialization:
+    
+    ```python
+    init_from = 'scratch'
+    ```
+    
+    The vocab size is automatically detected from `meta.pkl` or defaults to 50304.
+  </Tab>
+  
+  <Tab title="resume">
+    Resume training from a checkpoint:
+    
+    ```python
+    init_from = 'resume'
+    out_dir = 'out'  # directory containing ckpt.pt
+    ```
+    
+    Loads model weights, optimizer state, iteration count, and best validation loss.
+  </Tab>
+  
+  <Tab title="gpt2*">
+    Initialize from pretrained OpenAI GPT-2 weights:
+    
+    ```python
+    init_from = 'gpt2'        # 124M params
+    init_from = 'gpt2-medium' # 350M params
+    init_from = 'gpt2-large'  # 774M params
+    init_from = 'gpt2-xl'     # 1.5B params
+    ```
+    
+    Useful for finetuning on custom datasets.
+  </Tab>
+</Tabs>
+
+## Checkpointing
+
+Checkpoints are automatically saved to `out_dir` when validation loss improves:
+
+```python
+out_dir = 'out'                    # checkpoint directory
+eval_interval = 2000               # evaluate every N iterations
+eval_iters = 200                   # use N batches for evaluation
+always_save_checkpoint = True      # save even if val loss doesn't improve
+```
+
+Each checkpoint contains:
+- Model weights (`model`)
+- Optimizer state (`optimizer`)
+- Model architecture config (`model_args`)
+- Current iteration (`iter_num`)
+- Best validation loss (`best_val_loss`)
+- Full training config (`config`)
+
+## Device Support
+
+nanoGPT runs on multiple hardware platforms:
+
+<Tabs>
+  <Tab title="CUDA (GPU)">
+    ```bash
+    python train.py --device=cuda
+    ```
+    
+    Automatically uses bfloat16 if supported, otherwise float16 with gradient scaling.
+  </Tab>
+  
+  <Tab title="Apple Silicon (MPS)">
+    ```bash
+    python train.py --device=mps
+    ```
+    
+    Uses Metal Performance Shaders for 2-3× speedup on M1/M2/M3 Macs.
+  </Tab>
+  
+  <Tab title="CPU">
+    ```bash
+    python train.py --device=cpu --compile=False
+    ```
+    
+    Runs on CPU with torch.compile disabled. Much slower but useful for debugging.
+  </Tab>
+</Tabs>
+
+## Configuration System
+
+Override defaults using command-line arguments or config files:
+
+```bash
+# Command-line overrides
+python train.py --batch_size=32 --learning_rate=1e-3
+
+# Config file (recommended)
+python train.py config/train_shakespeare_char.py
+
+# Mix both (CLI overrides config file)
+python train.py config/train_gpt2.py --max_iters=100000
+```
+
+<Warning>
+  Command-line arguments always take precedence over config files.
+</Warning>
+
+## Monitoring Training
+
+### Console Logging
+
+Training progress is logged to console:
+
+```
+step 2000: train loss 3.1234, val loss 3.2456
+iter 2001: loss 3.1567, time 142.34ms, mfu 45.67%
+```
+
+- **mfu**: Model FLOPs Utilization - percentage of theoretical peak GPU performance
+- **time**: Time per iteration in milliseconds
+
+### Weights & Biases Integration
+
+Optional W&B logging:
+
+```python
+wandb_log = True
+wandb_project = 'owt'
+wandb_run_name = 'gpt2-124M'
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Shakespeare Tutorial" icon="book" href="/training/shakespeare">
+    Train your first character-level GPT on Shakespeare
+  </Card>
+  
+  <Card title="GPT-2 Reproduction" icon="robot" href="/training/gpt2-reproduction">
+    Reproduce OpenAI's GPT-2 results
+  </Card>
+  
+  <Card title="Finetuning" icon="sliders" href="/training/finetuning">
+    Finetune pretrained models on custom data
+  </Card>
+  
+  <Card title="Distributed Training" icon="server" href="/training/distributed">
+    Scale training across multiple GPUs
+  </Card>
+</CardGroup>

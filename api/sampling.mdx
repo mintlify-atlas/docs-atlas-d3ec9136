@@ -1,0 +1,332 @@
+---
+title: 'Sampling Parameters'
+description: 'Configuration parameters for sample.py'
+---
+
+# Sampling Parameters
+
+The `sample.py` script generates text samples from trained GPT models. It supports various sampling strategies and configurations.
+
+## Usage
+
+```bash
+# Sample from a trained model
+python sample.py --init_from=resume --out_dir=out-shakespeare
+
+# Sample from pretrained GPT-2
+python sample.py --init_from=gpt2-xl --num_samples=5
+
+# Custom sampling parameters
+python sample.py --temperature=0.9 --top_k=100 --max_new_tokens=1000
+```
+
+## Model Loading Parameters
+
+<ParamField path="init_from" type="str" default="'resume'">
+  Where to load the model from:
+  - `'resume'`: Load from checkpoint in `out_dir`
+  - `'gpt2'`, `'gpt2-medium'`, `'gpt2-large'`, `'gpt2-xl'`: Load pretrained OpenAI models
+</ParamField>
+
+<ParamField path="out_dir" type="str" default="'out'">
+  Directory containing the checkpoint (only used when `init_from='resume'`)
+</ParamField>
+
+## Generation Parameters
+
+<ParamField path="start" type="str" default="'\n'">
+  Starting prompt for generation. Can also be:
+  - A string: `"Once upon a time"`
+  - A special token: `"<|endoftext|>"`
+  - A file path: `"FILE:prompt.txt"` to read prompt from file
+</ParamField>
+
+<ParamField path="num_samples" type="int" default="10">
+  Number of samples to generate
+</ParamField>
+
+<ParamField path="max_new_tokens" type="int" default="500">
+  Number of tokens to generate per sample
+</ParamField>
+
+<ParamField path="temperature" type="float" default="0.8">
+  Sampling temperature:
+  - `1.0`: No change to probabilities
+  - `< 1.0`: More confident/deterministic (sharper distribution)
+  - `> 1.0`: More random/creative (flatter distribution)
+  - `0.0`: Greedy decoding (always pick most likely token)
+</ParamField>
+
+<ParamField path="top_k" type="int" default="200">
+  Retain only the top-k most likely tokens. Lower values make output more focused.
+  Set to `None` to disable top-k filtering.
+</ParamField>
+
+## System Parameters
+
+<ParamField path="seed" type="int" default="1337">
+  Random seed for reproducibility
+</ParamField>
+
+<ParamField path="device" type="str" default="'cuda'">
+  Device to use: `'cpu'`, `'cuda'`, `'cuda:0'`, `'cuda:1'`, or `'mps'` (for Mac)
+</ParamField>
+
+<ParamField path="dtype" type="str" default="'bfloat16' or 'float16'">
+  Data type: `'float32'`, `'bfloat16'`, or `'float16'`. Defaults to bfloat16 if CUDA supports it.
+</ParamField>
+
+<ParamField path="compile" type="bool" default="False">
+  Whether to use PyTorch 2.0 compile for faster inference
+</ParamField>
+
+## Examples
+
+### Basic Sampling
+
+```bash
+# Generate 10 samples from your trained model
+python sample.py \
+    --init_from=resume \
+    --out_dir=out-shakespeare \
+    --num_samples=10 \
+    --max_new_tokens=500
+```
+
+### Creative Sampling
+
+```bash
+# More random and diverse outputs
+python sample.py \
+    --temperature=1.2 \
+    --top_k=None \
+    --num_samples=5
+```
+
+<Note>
+  Higher temperature and no top-k filtering produces more diverse but potentially less coherent text.
+</Note>
+
+### Deterministic Sampling
+
+```bash
+# More focused and deterministic outputs
+python sample.py \
+    --temperature=0.5 \
+    --top_k=40 \
+    --seed=42
+```
+
+### Using a Custom Prompt
+
+```bash
+# Generate from a specific prompt
+python sample.py \
+    --start="Once upon a time" \
+    --num_samples=3 \
+    --max_new_tokens=1000
+```
+
+### Loading Prompt from File
+
+```bash
+# Read prompt from a text file
+echo "The meaning of life is" > prompt.txt
+python sample.py \
+    --start="FILE:prompt.txt" \
+    --max_new_tokens=500
+```
+
+### Using Pretrained GPT-2
+
+```bash
+# Sample from GPT-2 XL (1.5B parameters)
+python sample.py \
+    --init_from=gpt2-xl \
+    --start="In the field of artificial intelligence" \
+    --temperature=0.7 \
+    --top_k=100 \
+    --num_samples=5
+```
+
+## Sampling Strategies
+
+<Tabs>
+  <Tab title="Greedy Decoding">
+    ```bash
+    python sample.py --temperature=0.0
+    ```
+    Always picks the most likely token. Deterministic but can be repetitive.
+  </Tab>
+  
+  <Tab title="Top-K Sampling">
+    ```bash
+    python sample.py --temperature=0.8 --top_k=40
+    ```
+    Samples from the top-k most likely tokens. Good balance of quality and diversity.
+  </Tab>
+  
+  <Tab title="Temperature Sampling">
+    ```bash
+    python sample.py --temperature=0.9 --top_k=None
+    ```
+    Samples from the full distribution with temperature scaling. More creative but less focused.
+  </Tab>
+  
+  <Tab title="Nucleus (Top-p)">
+    <Warning>
+      Top-p (nucleus) sampling is not currently implemented in nanoGPT. Use top-k as an alternative.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Understanding Temperature
+
+Temperature controls the randomness of predictions:
+
+```python
+# Temperature scaling
+logits = logits / temperature
+probs = softmax(logits)
+```
+
+| Temperature | Effect | Use Case |
+|-------------|--------|----------|
+| 0.0 | Greedy decoding | Deterministic output |
+| 0.3-0.5 | Very focused | Factual text, code |
+| 0.7-0.9 | Balanced | General writing |
+| 1.0 | Unchanged | Model's learned distribution |
+| 1.2-1.5 | Creative | Story writing, poetry |
+| 2.0+ | Very random | Experimental, rarely useful |
+
+## Understanding Top-K
+
+Top-k filtering limits sampling to the k most probable tokens:
+
+```python
+# Top-k filtering
+if top_k is not None:
+    values, _ = torch.topk(logits, top_k)
+    logits[logits < values[:, [-1]]] = -float('Inf')
+```
+
+| Top-K | Effect |
+|-------|--------|
+| 1 | Greedy decoding |
+| 10-40 | Very focused |
+| 50-100 | Balanced |
+| 200+ | More diverse |
+| None | No filtering |
+
+## Output Format
+
+The script outputs samples separated by dashes:
+
+```
+Sample 1 text goes here...
+---------------
+Sample 2 text goes here...
+---------------
+```
+
+## Tokenization
+
+### Using Dataset Tokenizer
+
+If your checkpoint includes dataset metadata (`meta.pkl`), the script automatically uses the correct tokenizer:
+
+```python
+# Automatically loaded from data/{dataset}/meta.pkl
+encode = lambda s: [stoi[c] for c in s]
+decode = lambda l: ''.join([itos[i] for i in l])
+```
+
+### Using GPT-2 Tokenizer
+
+If no metadata is found, the script defaults to GPT-2's BPE tokenizer:
+
+```python
+import tiktoken
+enc = tiktoken.get_encoding("gpt2")
+encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
+decode = lambda l: enc.decode(l)
+```
+
+## Python API Usage
+
+You can also use the sampling logic programmatically:
+
+```python
+import torch
+from model import GPT
+
+# Load model
+model = GPT.from_pretrained('gpt2')
+model.eval()
+model.to('cuda')
+
+# Encode prompt
+import tiktoken
+enc = tiktoken.get_encoding('gpt2')
+prompt = "Once upon a time"
+start_ids = enc.encode(prompt)
+x = torch.tensor(start_ids, dtype=torch.long, device='cuda')[None, ...]
+
+# Generate
+with torch.no_grad():
+    y = model.generate(
+        x, 
+        max_new_tokens=500,
+        temperature=0.8,
+        top_k=200
+    )
+
+# Decode
+generated_text = enc.decode(y[0].tolist())
+print(generated_text)
+```
+
+## Performance Tips
+
+<Tabs>
+  <Tab title="Speed">
+    - Set `compile=True` for faster generation (PyTorch 2.0+)
+    - Use GPU (`device='cuda'`) for much faster inference
+    - Use `dtype='float16'` or `dtype='bfloat16'` for 2x speedup
+    - Generate multiple samples in batches if possible
+  </Tab>
+  
+  <Tab title="Quality">
+    - Start with `temperature=0.8` and `top_k=200`
+    - Lower temperature (0.5-0.7) for more coherent text
+    - Lower top_k (40-100) for more focused outputs
+    - Use proper prompts that match your training data
+  </Tab>
+  
+  <Tab title="Diversity">
+    - Increase temperature (0.9-1.2) for more varied outputs
+    - Set `top_k=None` to sample from full distribution
+    - Generate with different seeds for reproducible diversity
+    - Use longer prompts to guide generation
+  </Tab>
+</Tabs>
+
+## Common Issues
+
+<Warning>
+  **Repetitive Text**: Lower the temperature or reduce top_k to make output more focused.
+</Warning>
+
+<Warning>
+  **Incoherent Text**: Your model may be undertrained. Try more training iterations or use a pretrained model.
+</Warning>
+
+<Warning>
+  **Out of Memory**: Reduce `max_new_tokens` or use CPU with `device='cpu'`.
+</Warning>
+
+## See Also
+
+- [GPT.generate()](/api/gpt#generate) - Generation method details
+- [Training Parameters](/api/training) - Training configuration
+- [GPT](/api/gpt) - Model class

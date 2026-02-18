@@ -1,0 +1,119 @@
+---
+title: Introduction to nanoGPT
+description: The simplest, fastest repository for training and finetuning medium-sized GPT models
+---
+
+# Welcome to nanoGPT
+
+nanoGPT is the simplest, fastest repository for training and finetuning medium-sized GPT models. It prioritizes simplicity and performance, making it easy to hack and adapt to your needs.
+
+<Note>
+  **Update Nov 2025**: nanoGPT has a new and improved cousin called [nanochat](https://github.com/karpathy/nanochat). For new projects, consider using nanochat instead. nanoGPT is maintained for posterity and remains an excellent learning resource.
+</Note>
+
+## What Makes nanoGPT Special?
+
+nanoGPT is a complete rewrite of minGPT that prioritizes practicality over education. The entire codebase consists of:
+
+- **~300 lines** in `train.py` - A clean, boilerplate training loop
+- **~300 lines** in `model.py` - Complete GPT model definition with optional GPT-2 weight loading
+
+Because the code is so simple and readable, it's extremely easy to:
+- Train new models from scratch
+- Finetune pretrained checkpoints
+- Experiment with architectural modifications
+- Understand every detail of the implementation
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Simple & Readable" icon="code" href="/model/architecture">
+    Just ~600 lines of clean, hackable code. No complex abstractions or unnecessary frameworks.
+  </Card>
+  
+  <Card title="Fast Training" icon="bolt" href="/training/overview">
+    Reproduces GPT-2 (124M) in ~4 days on 8xA100. Optimized with PyTorch 2.0 compile and Flash Attention.
+  </Card>
+  
+  <Card title="Easy Finetuning" icon="wand-magic-sparkles" href="/training/finetuning">
+    Start from pretrained GPT-2 weights (up to 1.3B params) and finetune on your custom datasets.
+  </Card>
+  
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Train a character-level Shakespeare model in under 3 minutes on a single GPU.
+  </Card>
+</CardGroup>
+
+## What Can You Build?
+
+### Character-Level Text Generation
+Train a baby GPT on Shakespeare in minutes:
+```python
+python data/shakespeare_char/prepare.py
+python train.py config/train_shakespeare_char.py
+python sample.py --out_dir=out-shakespeare-char
+```
+
+### GPT-2 Reproduction
+Fully reproduce GPT-2 (124M parameters) results on OpenWebText:
+```bash
+python data/openwebtext/prepare.py
+torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+```
+
+### Custom Finetuning
+Finetune pretrained GPT-2 models on your own text:
+```python
+python train.py config/finetune_shakespeare.py
+```
+
+## Performance Highlights
+
+- **PyTorch 2.0 Compile**: One line of code cuts iteration time from ~250ms to ~135ms
+- **Flash Attention**: Automatic use of optimized CUDA kernels for faster training
+- **Distributed Training**: Built-in support for multi-GPU and multi-node training with DDP
+- **Apple Silicon Support**: Use `--device=mps` for 2-3x faster training on M1/M2/M3 Macs
+
+## Baseline Results
+
+Validation loss on OpenWebText for different GPT-2 model sizes:
+
+| Model | Parameters | Train Loss | Val Loss |
+|-------|------------|------------|----------|
+| gpt2 | 124M | 3.11 | 3.12 |
+| gpt2-medium | 350M | 2.85 | 2.84 |
+| gpt2-large | 774M | 2.66 | 2.67 |
+| gpt2-xl | 1558M | 2.56 | 2.54 |
+
+## Who Is This For?
+
+**Perfect for:**
+- Researchers wanting a hackable GPT implementation
+- Students learning about transformers and language models
+- Engineers building custom text generation solutions
+- Anyone who wants to understand GPTs from first principles
+
+**Not recommended if:**
+- You need production-ready, battle-tested code (consider Hugging Face Transformers)
+- You want a high-level API with lots of abstractions
+- You're starting a new project (consider nanochat instead)
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install dependencies and set up your environment
+  </Card>
+  
+  <Card title="Quick Start" icon="play" href="/quickstart">
+    Train your first model in under 5 minutes
+  </Card>
+  
+  <Card title="Architecture" icon="diagram-project" href="/model/architecture">
+    Understand the GPT implementation
+  </Card>
+</CardGroup>
+
+<Note>
+  For questions and discussions, join the **#nanoGPT** channel on [Discord](https://discord.gg/3zy8kqD9Cp)
+</Note>
