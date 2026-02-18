@@ -1,0 +1,99 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "nanoGPT",
+  "projectDescription": "The simplest, fastest repository for training and finetuning medium-sized GPT models",
+  "theme": "aspen",
+  "primaryColor": "#10b981",
+  "lightColor": "#34d399",
+  "darkColor": "#059669",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": ["introduction", "installation", "quickstart"]
+          },
+          {
+            "group": "Training",
+            "pages": [
+              "training/overview",
+              "training/shakespeare",
+              "training/gpt2-reproduction",
+              "training/finetuning",
+              "training/distributed"
+            ]
+          },
+          {
+            "group": "Model",
+            "pages": [
+              "model/architecture",
+              "model/configuration",
+              "model/inference"
+            ]
+          },
+          {
+            "group": "Data",
+            "pages": [
+              "data/preparation",
+              "data/datasets",
+              "data/tokenization"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/performance",
+              "advanced/scaling-laws",
+              "advanced/hyperparameters"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core",
+            "pages": [
+              "api/gpt",
+              "api/gpt-config",
+              "api/training",
+              "api/sampling"
+            ]
+          },
+          {
+            "group": "Components",
+            "pages": [
+              "api/attention",
+              "api/mlp",
+              "api/block"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Train GPT-2 from scratch on custom datasets",
+    "Finetune pretrained GPT-2 models (124M to 1.5B parameters)",
+    "Simple, readable codebase (~600 lines total)",
+    "Distributed training with PyTorch DDP",
+    "Flash Attention support for efficiency",
+    "PyTorch 2.0 compile for speedup",
+    "Character-level and BPE tokenization",
+    "Sampling and inference utilities"
+  ],
+  "publicApiSurface": [
+    "GPT",
+    "GPTConfig",
+    "CausalSelfAttention",
+    "MLP",
+    "Block",
+    "LayerNorm",
+    "train.py",
+    "sample.py",
+    "configurator.py"
+  ]
+}
